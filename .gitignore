@@ -1,0 +1,15 @@
+# build artifacts
+build/
+*.o
+*.swp
+*.log
+
+# editor junk
+.DS_Store
+.vscode/
+.idea/
+
+# wlroots / meson
+meson-private/
+meson-logs/
+compile_commands.json

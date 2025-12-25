@@ -1,0 +1,69 @@
+Arch
+
+
+
+Arch Setup
+sudo pacman -Syu
+groups
+sudo usermod -aG video,input,seat arma
+
+
+Dev setup:
+sudo pacman -Syu
+
+pacman -Ss wlroots
+sudo pacman -S wlroots0.19
+
+sudo pacman -S --needed \
+  wayland wayland-protocols \
+  wlroots \
+  libxkbcommon libinput \
+  seatd \
+  xorg-xwayland \
+  pixman \
+  foot
+
+sudo systemctl enable --now seatd
+loginctl seat-status seat0
+
+groups 
+should list ...
+sudo usermod -aG video,input,seat arma
+restart
+arma
+
+
+Launch wayland
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+export WLR_RENDERER=pixman
+labwc
+
+
+sudo pacman -S --needed labwc foot
+
+sudo pacman -S noto-fonts-emoji
+
+sudo pacman -S git
+
+mkdir -p ~/dev
+cd ~/dev
+git clone https://gitlab.freedesktop.org/wlroots/wlroots.git
+
+mkdir -p ~/dev/ade/compositor
+cp ~/dev/wlroots/tinywl/tinywl.c ~/dev/ade/compositor/ade-compositor.c
+cd ~/dev/ade/compositor
+
+
+sudo pacman -S --needed meson ninja pkgconf gcc
+
+
+sudo pacman -S --needed wayland-protocols wayland-utils
+sudo pacman -S --needed wayland
+sudo pacman -S --needed wlr-protocols
+
+
+
+sudo pacman -S --needed fuzzel
+
+
+

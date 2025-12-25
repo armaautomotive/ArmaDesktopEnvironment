@@ -1,0 +1,5 @@
+
+
+pkill ade-compositor
+
+
