@@ -1,3 +1,4 @@
+#include <linux/input-event-codes.h>
 #define _POSIX_C_SOURCE 200809L
 
 #include <assert.h>
@@ -79,6 +80,10 @@ struct tinywl_server {
     struct wlr_output_layout *output_layout;
     struct wl_list outputs;
     struct wl_listener new_output;
+    
+    // Window cascading state (applied on first map)
+    int cascade_index;
+    int cascade_step;
 };
 
 
@@ -449,6 +454,18 @@ static void seat_request_set_selection(struct wl_listener *listener, void *data)
     wlr_seat_set_selection(server->seat, event->source, event->serial);
 }
 
+static struct tinywl_toplevel *toplevel_from_scene_node(struct wlr_scene_node *node) {
+    if (node == NULL) {
+        return NULL;
+    }
+    // Walk up the scene tree until we hit the tinywl_toplevel root node (it has node.data set).
+    struct wlr_scene_tree *tree = node->parent;
+    while (tree != NULL && tree->node.data == NULL) {
+        tree = tree->node.parent;
+    }
+    return tree ? (struct tinywl_toplevel *)tree->node.data : NULL;
+}
+
 static struct tinywl_toplevel *desktop_toplevel_at(
         struct tinywl_server *server, double lx, double ly,
         struct wlr_surface **surface, double *sx, double *sy) {
@@ -476,6 +493,9 @@ static struct tinywl_toplevel *desktop_toplevel_at(
     }
     return tree->node.data;
 }
+
+static void begin_interactive(struct tinywl_toplevel *toplevel,
+        enum tinywl_cursor_mode mode, uint32_t edges);
 
 static void reset_cursor_mode(struct tinywl_server *server) {
     /* Reset the cursor mode to passthrough. */
@@ -623,18 +643,43 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     struct tinywl_server *server =
         wl_container_of(listener, server, cursor_button);
     struct wlr_pointer_button_event *event = data;
-    /* Notify the client with pointer focus that a button press has occurred */
+    // If you released any buttons, we exit interactive move/resize mode.
+    if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+        reset_cursor_mode(server);
+        // Still notify release to the client which had pointer focus.
+        wlr_seat_pointer_notify_button(server->seat,
+                event->time_msec, event->button, event->state);
+        return;
+    }
+
+    // Button pressed: first check if we clicked on a compositor decoration (the yellow tab).
+    double sx = 0, sy = 0;
+    struct wlr_scene_node *node = wlr_scene_node_at(
+        &server->scene->tree.node, server->cursor->x, server->cursor->y, &sx, &sy);
+
+    struct tinywl_toplevel *clicked_toplevel = NULL;
+    if (node != NULL) {
+        clicked_toplevel = toplevel_from_scene_node(node);
+    }
+
+    if (clicked_toplevel != NULL && event->button == BTN_LEFT) {
+        // If the node under the cursor is the BeOS tab, start moving the window.
+        if (node == &clicked_toplevel->tab_rect->node) {
+            focus_toplevel(clicked_toplevel);
+            begin_interactive(clicked_toplevel, TINYWL_CURSOR_MOVE, 0);
+            return; // Do not send this click to clients
+        }
+    }
+
+    // Otherwise, behave like tinywl: notify the client and focus the toplevel under the cursor.
     wlr_seat_pointer_notify_button(server->seat,
             event->time_msec, event->button, event->state);
-    if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
-        /* If you released any buttons, we exit interactive move/resize mode. */
-        reset_cursor_mode(server);
-    } else {
-        /* Focus that client if the button was _pressed_ */
-        double sx, sy;
+
+    {
+        double csx, csy;
         struct wlr_surface *surface = NULL;
         struct tinywl_toplevel *toplevel = desktop_toplevel_at(server,
-                server->cursor->x, server->cursor->y, &surface, &sx, &sy);
+                server->cursor->x, server->cursor->y, &surface, &csx, &csy);
         focus_toplevel(toplevel);
     }
 }
@@ -686,6 +731,23 @@ static void output_request_state(struct wl_listener *listener, void *data) {
     struct tinywl_output *output = wl_container_of(listener, output, request_state);
     const struct wlr_output_event_request_state *event = data;
     wlr_output_commit_state(output->wlr_output, event->state);
+}
+
+static bool ade_get_primary_output_size(struct tinywl_server *server, int *out_w, int *out_h) {
+    if (out_w) *out_w = 0;
+    if (out_h) *out_h = 0;
+
+    struct tinywl_output *o = NULL;
+    wl_list_for_each(o, &server->outputs, link) {
+        int w = 0, h = 0;
+        wlr_output_effective_resolution(o->wlr_output, &w, &h);
+        if (w > 0 && h > 0) {
+            if (out_w) *out_w = w;
+            if (out_h) *out_h = h;
+            return true;
+        }
+    }
+    return false;
 }
 
 static void output_destroy(struct wl_listener *listener, void *data) {
@@ -767,6 +829,44 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
     struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, map);
 
     wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
+
+    // Center the window on the primary output the first time it maps,
+    // and cascade each new window slightly so they don't overlap perfectly.
+    int ow = 0, oh = 0;
+    if (ade_get_primary_output_size(toplevel->server, &ow, &oh)) {
+        // wlroots 0.19 exposes the negotiated xdg-surface geometry directly.
+        struct wlr_box geo = toplevel->xdg_toplevel->base->geometry;
+        if (geo.width > 0 && geo.height > 0) {
+            struct tinywl_server *server = toplevel->server;
+
+            int base_x = (ow - geo.width) / 2 - geo.x;
+            int base_y = (oh - geo.height) / 2 - geo.y;
+
+            int step = (server->cascade_step > 0) ? server->cascade_step : 24;
+            int idx = (server->cascade_index < 0) ? 0 : server->cascade_index;
+
+            // Offset diagonally. Wrap every ~12 windows to avoid drifting too far.
+            int wrap = 12;
+            int off = (idx % wrap) * step;
+
+            int x = base_x + off;
+            int y = base_y + off;
+
+            // Clamp to keep the window mostly on-screen
+            int min_x = -geo.x;
+            int min_y = -geo.y;
+            int max_x = (ow - geo.width) - geo.x;
+            int max_y = (oh - geo.height) - geo.y;
+            if (x < min_x) x = min_x;
+            if (y < min_y) y = min_y;
+            if (x > max_x) x = max_x;
+            if (y > max_y) y = max_y;
+
+            wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
+
+            server->cascade_index = idx + 1;
+        }
+    }
 
     focus_toplevel(toplevel);
 }
@@ -1082,6 +1182,8 @@ int main(int argc, char *argv[]) {
     }
 
     struct tinywl_server server = {0};
+    server.cascade_index = 0;
+    server.cascade_step = 24; // pixels per new window
     /* The Wayland display is managed by libwayland. It handles accepting
      * clients from the Unix socket, manging Wayland globals, and so on. */
     server.wl_display = wl_display_create();
