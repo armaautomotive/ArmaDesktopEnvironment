@@ -5,6 +5,10 @@
 # Ensure terminal sane before start
 stty sane
 
+export XCURSOR_THEME=haiku
+export XCURSOR_SIZE=32
+export XCURSOR_PATH="$PWD/cursors:$XCURSOR_PATH"
+
 # Run compositor
 ./build/ade-compositor
 

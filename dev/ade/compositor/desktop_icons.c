@@ -10,6 +10,7 @@
 #include <wayland-server-core.h>
 
 #include <wlr/types/wlr_scene.h>
+#include <wlr/types/wlr_buffer.h>
 #include <wlr/util/log.h>
 
 #include <cairo/cairo.h>
@@ -119,8 +120,8 @@ static struct wlr_buffer *make_label_buffer(const char *text, int *out_w, int *o
     if (!text || !*text) return NULL;
 
     // Tuning knobs
-    const int pad_x = 4;
-    const int pad_y = 2;
+    const int pad_x = 3;
+    const int pad_y = 1;
     const int shadow_dx = 1;
     const int shadow_dy = 1;
     const int max_chars = 64;
@@ -137,7 +138,7 @@ static struct wlr_buffer *make_label_buffer(const char *text, int *out_w, int *o
     cairo_t *cr0 = cairo_create(scratch);
 
     PangoLayout *layout0 = pango_cairo_create_layout(cr0);
-    PangoFontDescription *desc = pango_font_description_from_string("Sans 9");
+    PangoFontDescription *desc = pango_font_description_from_string("Sans 7");
     pango_layout_set_font_description(layout0, desc);
     pango_layout_set_text(layout0, tmp, -1);
     pango_layout_set_single_paragraph_mode(layout0, TRUE);
@@ -169,11 +170,13 @@ static struct wlr_buffer *make_label_buffer(const char *text, int *out_w, int *o
     // Make sure antialiasing is enabled
     cairo_font_options_t *fopt = cairo_font_options_create();
     cairo_font_options_set_antialias(fopt, CAIRO_ANTIALIAS_SUBPIXEL);
+    cairo_font_options_set_hint_style(fopt, CAIRO_HINT_STYLE_NONE);
+    cairo_font_options_set_hint_metrics(fopt, CAIRO_HINT_METRICS_OFF);
     cairo_set_font_options(cr, fopt);
     cairo_font_options_destroy(fopt);
 
     PangoLayout *layout = pango_cairo_create_layout(cr);
-    PangoFontDescription *desc2 = pango_font_description_from_string("Sans 9");
+    PangoFontDescription *desc2 = pango_font_description_from_string("Sans 7");
     pango_layout_set_font_description(layout, desc2);
     pango_layout_set_text(layout, tmp, -1);
 
@@ -182,12 +185,12 @@ static struct wlr_buffer *make_label_buffer(const char *text, int *out_w, int *o
     pango_layout_set_width(layout, (W - pad_x * 2) * PANGO_SCALE);
 
     // Shadow
-    cairo_set_source_rgba(cr, 0, 0, 0, 0.75);
+    cairo_set_source_rgba(cr, 0, 0, 0, 0.55);
     cairo_move_to(cr, pad_x + shadow_dx, pad_y + shadow_dy);
     pango_cairo_show_layout(cr, layout);
 
-    // Foreground (white)
-    cairo_set_source_rgba(cr, 1, 1, 1, 1);
+    // Foreground (slightly off-white)
+    cairo_set_source_rgba(cr, 0.95, 0.97, 1.0, 1);
     cairo_move_to(cr, pad_x, pad_y);
     pango_cairo_show_layout(cr, layout);
 
@@ -294,8 +297,10 @@ static void build_icon_scene(struct tinywl_server *server, struct ade_desktop_ic
         wlr_scene_node_set_position(&sb->node, ic->x, ic->y);
         ic->node = &sb->node;
 
-        ic->icon_w = 48;
-        ic->icon_h = 48;
+        ic->icon_w = (int)wlr_buffer_get_width(buf);
+        ic->icon_h = (int)wlr_buffer_get_height(buf);
+        if (ic->icon_w <= 0) ic->icon_w = 48;
+        if (ic->icon_h <= 0) ic->icon_h = 48;
 
         // Always render a label for debugging: if config label is missing, show a default.
         const char *label_text = (ic->label && *ic->label) ? ic->label : "Icon";
@@ -304,13 +309,14 @@ static void build_icon_scene(struct tinywl_server *server, struct ade_desktop_ic
         if (lb) {
             struct wlr_scene_buffer *ls = wlr_scene_buffer_create(server->desktop_icons, lb);
             wlr_buffer_drop(lb);
+            wlr_scene_buffer_set_filter_mode(ls, WLR_SCALE_FILTER_BILINEAR);
 
             ic->label_w = lw;
             ic->label_h = lh;
 
             // Position using the *buffer* dimensions so the label actually centers under the icon
             int lx = ic->x + (ic->icon_w / 2) - (ic->label_w / 2);
-            int ly = ic->y + ic->icon_h + 8;
+            int ly = ic->y + ic->icon_h + 16;
             if (lx < 0) lx = 0;
             if (ly < 0) ly = 0;
 
@@ -354,6 +360,9 @@ static void build_icon_scene(struct tinywl_server *server, struct ade_desktop_ic
             if (ic->node) wlr_scene_node_raise_to_top(ic->node);
             if (ic->label_node) wlr_scene_node_raise_to_top(ic->label_node);
         }
+
+        wlr_log(WLR_INFO, "ADE: icon '%s' icon_w=%d icon_h=%d label_w=%d label_h=%d",
+            (ic->label && *ic->label) ? ic->label : "(no-label)", ic->icon_w, ic->icon_h, ic->label_w, ic->label_h);
 
         return;
     }

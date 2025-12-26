@@ -1606,6 +1606,44 @@ static void ade_scene_draw_text5x7(struct wlr_scene_tree *parent, int x, int y,
     }
 }
 
+// Pseudo anti-aliased text: draw a faint 2x2 "ink" behind each 1x1 pixel.
+// This softens jaggies without adding any new deps.
+static void ade_scene_draw_text5x7_aa(struct wlr_scene_tree *parent, int x, int y,
+                                     int scale, int spacing,
+                                     const float color[4], const char *text) {
+    if (!parent || !text) return;
+
+    // A soft halo behind the main pixel
+    float halo[4] = { color[0], color[1], color[2], color[3] * 0.35f };
+
+    int pen_x = x;
+    for (const char *p = text; *p; p++) {
+        const uint8_t *g = ade_glyph_5x7(*p);
+        for (int row = 0; row < 7; row++) {
+            uint8_t bits = g[row] & 0x1F;
+            for (int col = 0; col < 5; col++) {
+                if (bits & (1u << (4 - col))) {
+                    int px_x = pen_x + col * scale;
+                    int px_y = y + row * scale;
+
+                    // Halo pass (slightly larger)
+                    struct wlr_scene_rect *h = wlr_scene_rect_create(parent, scale + 1, scale + 1, halo);
+                    if (h) {
+                        wlr_scene_node_set_position(&h->node, px_x, px_y);
+                    }
+
+                    // Main pixel pass
+                    struct wlr_scene_rect *m = wlr_scene_rect_create(parent, scale, scale, color);
+                    if (m) {
+                        wlr_scene_node_set_position(&m->node, px_x, px_y);
+                    }
+                }
+            }
+        }
+        pen_x += (5 * scale) + spacing;
+    }
+}
+
 static struct ade_desktop_icon *ade_desktop_icon_from_scene_node(struct wlr_scene_node *node) {
     struct wlr_scene_node *n = node;
     while (n != NULL) {
@@ -1692,8 +1730,15 @@ static void ade_load_desktop_icons_from_conf(struct tinywl_server *server, const
 
         // Try PNG first (placed at 0,0 inside icon_tree)
         bool placed = false;
+        int icon_box_w = 48;
+        int icon_box_h = 48;
+
         struct wlr_buffer *icon_buf = ade_load_png_as_wlr_buffer(png);
         if (icon_buf != NULL) {
+            // Use the actual buffer size for centering the label
+            icon_box_w = (int)icon_buf->width;
+            icon_box_h = (int)icon_buf->height;
+
             struct wlr_scene_buffer *sb = wlr_scene_buffer_create(icon_tree, icon_buf);
             wlr_buffer_drop(icon_buf);
             if (sb != NULL) {
@@ -1705,7 +1750,7 @@ static void ade_load_desktop_icons_from_conf(struct tinywl_server *server, const
         // Fallback: placeholder rect
         if (!placed) {
             const float col[4] = { 0.80f, 0.80f, 0.80f, 1.0f };
-            struct wlr_scene_rect *r = wlr_scene_rect_create(icon_tree, 48, 48, col);
+            struct wlr_scene_rect *r = wlr_scene_rect_create(icon_tree, icon_box_w, icon_box_h, col);
             if (r != NULL) {
                 wlr_scene_node_set_position(&r->node, 0, 0);
                 placed = true;
@@ -1719,20 +1764,33 @@ static void ade_load_desktop_icons_from_conf(struct tinywl_server *server, const
             continue;
         }
 
-        // Bitmap label under the icon (centered under a 48px icon box)
-        const int icon_box_w = 48;
-        const int label_y = 52; // a few px below the 48px icon
-        const int scale = 2;
+        // Bitmap label under the icon (smaller, centered, slightly lower, pseudo-AA)
+        const int label_gap = 8;                 // space below the icon
+        const int label_y = icon_box_h + label_gap;
+        const int scale = 1;                     // smaller font
         const int spacing = 1;
-        int tw = ade_text5x7_width_px(label, scale, spacing);
+
+        // Limit label length to avoid huge blocks of pixels
+        char label_buf[64];
+        snprintf(label_buf, sizeof(label_buf), "%s", label);
+        if (strlen(label_buf) > 14) {
+            label_buf[14] = '\0';
+        }
+
+        int tw = ade_text5x7_width_px(label_buf, scale, spacing);
         int tx = (icon_box_w / 2) - (tw / 2);
-        if (tx < 0) tx = 0;
+
+        // allow slight negative for perfect centering (but clamp to keep on-icon)
+        if (tx < -8) tx = -8;
 
         // BeOS-ish: white text with a subtle dark shadow behind it
-        const float shadow[4] = { 0.0f, 0.0f, 0.0f, 0.55f };
+        const float shadow[4]  = { 0.0f, 0.0f, 0.0f, 0.55f };
         const float textcol[4] = { 0.98f, 0.98f, 0.98f, 1.0f };
-        ade_scene_draw_text5x7(icon_tree, tx + 1, label_y + 1, scale, spacing, shadow, label);
-        ade_scene_draw_text5x7(icon_tree, tx,     label_y,     scale, spacing, textcol, label);
+
+        // Shadow first
+        ade_scene_draw_text5x7_aa(icon_tree, tx + 1, label_y + 1, scale, spacing, shadow, label_buf);
+        // Main text
+        ade_scene_draw_text5x7_aa(icon_tree, tx,     label_y,     scale, spacing, textcol, label_buf);
 
         // keep icons above background
         wlr_scene_node_raise_to_top(&icon_tree->node);
