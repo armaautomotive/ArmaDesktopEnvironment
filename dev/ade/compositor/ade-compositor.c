@@ -154,6 +154,8 @@ struct tinywl_server {
     struct wl_listener new_xdg_decoration;
     
     struct wl_listener backend_destroy;
+    
+    bool backend_destroyed;
 };
 
 
@@ -960,8 +962,15 @@ static void ade_handle_signal(int sig) {
 static void ade_backend_destroy_notify(struct wl_listener *listener, void *data) {
     (void)data;
     struct tinywl_server *server = wl_container_of(listener, server, backend_destroy);
+
+    // IMPORTANT: remove our listener immediately so wlroots won't assert later
+    wl_list_remove(&server->backend_destroy.link);
+
+    server->backend_destroyed = true;
+    server->backend = NULL;
+
     wlr_log(WLR_ERROR, "ADE: backend destroyed -> terminating display");
-    if (server && server->wl_display) {
+    if (server->wl_display) {
         wl_display_terminate(server->wl_display);
     }
 }
@@ -2415,6 +2424,17 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
     wl_signal_add(&xdg_popup->events.destroy, &popup->destroy);
 }
 
+// Helper to safely detach the backend destroy listener if still linked.
+static void ade_detach_backend_destroy_listener(struct tinywl_server *server) {
+    if (!server) return;
+    // If the listener was added, its link pointers will be non-NULL.
+    if (server->backend_destroy.link.next != NULL && server->backend_destroy.link.prev != NULL) {
+        // Only remove if it looks linked (best-effort; wl_list_remove is safe if linked)
+        wl_list_remove(&server->backend_destroy.link);
+        wl_list_init(&server->backend_destroy.link);
+    }
+}
+
 static void server_new_layer_surface(struct wl_listener *listener, void *data) {
     struct tinywl_server *server =
         wl_container_of(listener, server, new_layer_surface);
@@ -2611,6 +2631,7 @@ int main(int argc, char *argv[]) {
     }
 
     struct tinywl_server server = {0};
+    server.backend_destroyed = false;
     server.cascade_index = 0;
     server.cascade_step = 24; // pixels per new window
     
@@ -2663,7 +2684,14 @@ int main(int argc, char *argv[]) {
     server.renderer = wlr_renderer_autocreate(server.backend);
     if (server.renderer == NULL) {
         wlr_log(WLR_ERROR, "failed to create wlr_renderer");
-        wlr_backend_destroy(server.backend);
+        if (!server.backend_destroyed) {
+            ade_detach_backend_destroy_listener(&server);
+            server.backend_destroyed = true;
+        }
+        if (server.backend != NULL) {
+            wlr_backend_destroy(server.backend);
+            server.backend = NULL;
+        }
         wl_display_destroy(server.wl_display);
         return 1;
     }
@@ -2679,7 +2707,14 @@ int main(int argc, char *argv[]) {
     if (server.allocator == NULL) {
         wlr_log(WLR_ERROR, "failed to create wlr_allocator");
         wlr_renderer_destroy(server.renderer);
-        wlr_backend_destroy(server.backend);
+        if (!server.backend_destroyed) {
+            ade_detach_backend_destroy_listener(&server);
+            server.backend_destroyed = true;
+        }
+        if (server.backend != NULL) {
+            wlr_backend_destroy(server.backend);
+            server.backend = NULL;
+        }
         wl_display_destroy(server.wl_display);
         return 1;
     }
@@ -2702,7 +2737,14 @@ int main(int argc, char *argv[]) {
         wlr_log(WLR_ERROR, "ADE: failed to create output layout");
         wlr_allocator_destroy(server.allocator);
         wlr_renderer_destroy(server.renderer);
-        wlr_backend_destroy(server.backend);
+        if (!server.backend_destroyed) {
+            ade_detach_backend_destroy_listener(&server);
+            server.backend_destroyed = true;
+        }
+        if (server.backend != NULL) {
+            wlr_backend_destroy(server.backend);
+            server.backend = NULL;
+        }
         wl_display_destroy(server.wl_display);
         return 1;
     }
@@ -2725,7 +2767,14 @@ int main(int argc, char *argv[]) {
         wlr_output_layout_destroy(server.output_layout);
         wlr_allocator_destroy(server.allocator);
         wlr_renderer_destroy(server.renderer);
-        wlr_backend_destroy(server.backend);
+        if (!server.backend_destroyed) {
+            ade_detach_backend_destroy_listener(&server);
+            server.backend_destroyed = true;
+        }
+        if (server.backend != NULL) {
+            wlr_backend_destroy(server.backend);
+            server.backend = NULL;
+        }
         wl_display_destroy(server.wl_display);
         return 1;
     }
@@ -2736,7 +2785,14 @@ int main(int argc, char *argv[]) {
         wlr_output_layout_destroy(server.output_layout);
         wlr_allocator_destroy(server.allocator);
         wlr_renderer_destroy(server.renderer);
-        wlr_backend_destroy(server.backend);
+        if (!server.backend_destroyed) {
+            ade_detach_backend_destroy_listener(&server);
+            server.backend_destroyed = true;
+        }
+        if (server.backend != NULL) {
+            wlr_backend_destroy(server.backend);
+            server.backend = NULL;
+        }
         wl_display_destroy(server.wl_display);
         return 1;
     }
@@ -2750,7 +2806,14 @@ int main(int argc, char *argv[]) {
         wlr_output_layout_destroy(server.output_layout);
         wlr_allocator_destroy(server.allocator);
         wlr_renderer_destroy(server.renderer);
-        wlr_backend_destroy(server.backend);
+        if (!server.backend_destroyed) {
+            ade_detach_backend_destroy_listener(&server);
+            server.backend_destroyed = true;
+        }
+        if (server.backend != NULL) {
+            wlr_backend_destroy(server.backend);
+            server.backend = NULL;
+        }
         wl_display_destroy(server.wl_display);
         return 1;
     }
@@ -2783,7 +2846,14 @@ int main(int argc, char *argv[]) {
         wlr_output_layout_destroy(server.output_layout);
         wlr_allocator_destroy(server.allocator);
         wlr_renderer_destroy(server.renderer);
-        wlr_backend_destroy(server.backend);
+        if (!server.backend_destroyed) {
+            ade_detach_backend_destroy_listener(&server);
+            server.backend_destroyed = true;
+        }
+        if (server.backend != NULL) {
+            wlr_backend_destroy(server.backend);
+            server.backend = NULL;
+        }
         wl_display_destroy(server.wl_display);
         return 1;
     }
@@ -2818,7 +2888,14 @@ int main(int argc, char *argv[]) {
         wlr_output_layout_destroy(server.output_layout);
         wlr_allocator_destroy(server.allocator);
         wlr_renderer_destroy(server.renderer);
-        wlr_backend_destroy(server.backend);
+        if (!server.backend_destroyed) {
+            ade_detach_backend_destroy_listener(&server);
+            server.backend_destroyed = true;
+        }
+        if (server.backend != NULL) {
+            wlr_backend_destroy(server.backend);
+            server.backend = NULL;
+        }
         wl_display_destroy(server.wl_display);
         return 1;
     }
@@ -2836,7 +2913,17 @@ int main(int argc, char *argv[]) {
         wlr_output_layout_destroy(server.output_layout);
         wlr_allocator_destroy(server.allocator);
         wlr_renderer_destroy(server.renderer);
-        wlr_backend_destroy(server.backend);
+
+        // Prevent wlroots assertion: remove backend destroy listener before finishing backend
+        if (!server.backend_destroyed) {
+            ade_detach_backend_destroy_listener(&server);
+            server.backend_destroyed = true;
+        }
+        if (server.backend != NULL) {
+            wlr_backend_destroy(server.backend);
+            server.backend = NULL;
+        }
+
         wl_display_destroy(server.wl_display);
         return 1;
     }
@@ -2988,7 +3075,18 @@ int main(int argc, char *argv[]) {
     wlr_cursor_destroy(server.cursor);
     wlr_allocator_destroy(server.allocator);
     wlr_renderer_destroy(server.renderer);
-    wlr_backend_destroy(server.backend);
+
+    // Prevent wlroots assertion: remove backend destroy listener before finishing backend.
+    // If the backend already died, ade_backend_destroy_notify() should have removed it and set backend=NULL.
+    if (!server.backend_destroyed) {
+        ade_detach_backend_destroy_listener(&server);
+        server.backend_destroyed = true;
+    }
+    if (server.backend != NULL) {
+        wlr_backend_destroy(server.backend);
+        server.backend = NULL;
+    }
+
     wl_display_destroy(server.wl_display);
     
     ade_global_display = NULL;
