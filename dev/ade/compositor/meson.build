@@ -5,7 +5,7 @@ project('ade-compositor', 'c',
   default_options: ['c_std=c11']
 )
 
-wlroots = dependency('wlroots-0.19')
+wlroots = dependency('wlroots-0.20')
 wayland_server = dependency('wayland-server')
 wayland_client = dependency('wayland-client')
 wayland_protocols = dependency('wayland-protocols')
