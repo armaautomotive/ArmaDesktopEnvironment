@@ -38,6 +38,7 @@ enum tinywl_cursor_mode {
     TINYWL_CURSOR_PASSTHROUGH,
     TINYWL_CURSOR_MOVE,
     TINYWL_CURSOR_RESIZE,
+    TINYWL_CURSOR_TABDRAG,
 };
 
 
@@ -84,6 +85,8 @@ struct tinywl_server {
     // Window cascading state (applied on first map)
     int cascade_index;
     int cascade_step;
+    
+    struct wlr_scene_rect *bg_rect;
 };
 
 
@@ -102,9 +105,19 @@ struct tinywl_toplevel {
     struct tinywl_server *server;
     struct wlr_xdg_toplevel *xdg_toplevel;
     struct wlr_scene_tree *scene_tree;
+    
     /* Simple server-side decoration: BeOS-style tab */
     struct wlr_scene_tree *decor_tree;
+    struct wlr_scene_tree *tab_tree;      // container for the whole tab (rect + text + close)
     struct wlr_scene_rect *tab_rect;
+    struct wlr_scene_tree *tab_text_tree; // children are tiny rects forming bitmap text
+    int tab_width_px;                     // current tab width (for clamping)
+    int tab_x_px;                         // current tab X offset (sliding along top)
+    
+    // Close button (right side of the tab)
+    struct wlr_scene_tree *close_tree;
+    struct wlr_scene_rect *close_bg;
+    struct wlr_scene_tree *close_x_tree;
     struct wl_listener map;
     struct wl_listener unmap;
     struct wl_listener commit;
@@ -162,6 +175,7 @@ static void ade_spawn_shell(const char *sh_cmd) {
     }
 }
 
+
 static void ade_show_help(void) {
     // Show key hints in a terminal so the user doesn't need to remember commands.
     // Using foot if available; fallback to xterm if installed.
@@ -169,6 +183,240 @@ static void ade_show_help(void) {
         "(command -v foot >/dev/null 2>&1 && exec foot -T ADE-Help -e /bin/sh -lc 'printf \"ADE – Arma Desktop Environment\\n\\nF1   = Terminal\\nF2   = Launcher\\nF9   = Help\\nF12  = Quit\\nAlt+Esc = Quit\\n\\n(Press Enter to close this help)\\n\"; read _') "
         "|| (command -v xterm >/dev/null 2>&1 && exec xterm -T ADE-Help -e /bin/sh -lc 'printf \"ADE – Arma Desktop Environment\\n\\nF1   = Terminal\\nF2   = Launcher\\nF9   = Help\\nF12  = Quit\\nAlt+Esc = Quit\\n\\n(Press Enter to close this help)\\n\"; read _')";
     ade_spawn_shell(cmd);
+}
+
+// -----------------------------------------------------------------------------
+// Very small built-in bitmap font renderer for the yellow BeOS-style tab.
+// We draw text as tiny rectangles ("pixels") so we don't need extra deps.
+// 5x7 font, only a minimal subset we care about right now.
+// -----------------------------------------------------------------------------
+
+static uint8_t ade_font5x7_get(char c, int col) {
+    // Each glyph is 5 columns wide. Return a 7-bit column mask (LSB = top).
+    // Missing glyphs fall back to '?'.
+    // NOTE: These are intentionally simple/rough.
+    if (col < 0 || col >= 5) {
+        return 0;
+    }
+
+    // Normalize
+    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+
+    switch (c) {
+    case ' ': {
+        static const uint8_t g[5] = {0,0,0,0,0};
+        return g[col];
+    }
+    case '-': {
+        static const uint8_t g[5] = {0,0,0b0010000,0,0};
+        return g[col];
+    }
+    case '.': {
+        static const uint8_t g[5] = {0,0,0,0b1000000,0b1000000};
+        return g[col];
+    }
+    case '0': { static const uint8_t g[5] = {0b0111110,0b1000001,0b1000001,0b1000001,0b0111110}; return g[col]; }
+    case '1': { static const uint8_t g[5] = {0b0000000,0b0100001,0b1111111,0b0000001,0b0000000}; return g[col]; }
+    case '2': { static const uint8_t g[5] = {0b0100011,0b1000101,0b1001001,0b1010001,0b0100001}; return g[col]; }
+    case '3': { static const uint8_t g[5] = {0b0100010,0b1000001,0b1001001,0b1001001,0b0110110}; return g[col]; }
+    case '4': { static const uint8_t g[5] = {0b0001100,0b0010100,0b0100100,0b1111111,0b0000100}; return g[col]; }
+    case '5': { static const uint8_t g[5] = {0b1110010,0b1010001,0b1010001,0b1010001,0b1001110}; return g[col]; }
+    case '6': { static const uint8_t g[5] = {0b0011110,0b0101001,0b1001001,0b1001001,0b0000110}; return g[col]; }
+    case '7': { static const uint8_t g[5] = {0b1000000,0b1000111,0b1001000,0b1010000,0b1100000}; return g[col]; }
+    case '8': { static const uint8_t g[5] = {0b0110110,0b1001001,0b1001001,0b1001001,0b0110110}; return g[col]; }
+    case '9': { static const uint8_t g[5] = {0b0110000,0b1001001,0b1001001,0b1001010,0b0111100}; return g[col]; }
+    case 'A': { static const uint8_t g[5] = {0b0111111,0b1001000,0b1001000,0b1001000,0b0111111}; return g[col]; }
+    case 'B': { static const uint8_t g[5] = {0b1111111,0b1001001,0b1001001,0b1001001,0b0110110}; return g[col]; }
+    case 'C': { static const uint8_t g[5] = {0b0111110,0b1000001,0b1000001,0b1000001,0b0100010}; return g[col]; }
+    case 'D': { static const uint8_t g[5] = {0b1111111,0b1000001,0b1000001,0b0100010,0b0011100}; return g[col]; }
+    case 'E': { static const uint8_t g[5] = {0b1111111,0b1001001,0b1001001,0b1001001,0b1000001}; return g[col]; }
+    case 'F': { static const uint8_t g[5] = {0b1111111,0b1001000,0b1001000,0b1001000,0b1000000}; return g[col]; }
+    case 'G': { static const uint8_t g[5] = {0b0111110,0b1000001,0b1001001,0b1001001,0b0101110}; return g[col]; }
+    case 'H': { static const uint8_t g[5] = {0b1111111,0b0001000,0b0001000,0b0001000,0b1111111}; return g[col]; }
+    case 'I': { static const uint8_t g[5] = {0,0b1000001,0b1111111,0b1000001,0}; return g[col]; }
+    case 'J': { static const uint8_t g[5] = {0b0000010,0b0000001,0b1000001,0b1111110,0b1000000}; return g[col]; }
+    case 'K': { static const uint8_t g[5] = {0b1111111,0b0001000,0b0010100,0b0100010,0b1000001}; return g[col]; }
+    case 'L': { static const uint8_t g[5] = {0b1111111,0b0000001,0b0000001,0b0000001,0b0000001}; return g[col]; }
+    case 'M': { static const uint8_t g[5] = {0b1111111,0b0100000,0b0011000,0b0100000,0b1111111}; return g[col]; }
+    case 'N': { static const uint8_t g[5] = {0b1111111,0b0100000,0b0010000,0b0001000,0b1111111}; return g[col]; }
+    case 'O': { static const uint8_t g[5] = {0b0111110,0b1000001,0b1000001,0b1000001,0b0111110}; return g[col]; }
+    case 'P': { static const uint8_t g[5] = {0b1111111,0b1001000,0b1001000,0b1001000,0b0110000}; return g[col]; }
+    case 'Q': { static const uint8_t g[5] = {0b0111110,0b1000001,0b1000101,0b1000010,0b0111101}; return g[col]; }
+    case 'R': { static const uint8_t g[5] = {0b1111111,0b1001000,0b1001100,0b1001010,0b0110001}; return g[col]; }
+    case 'S': { static const uint8_t g[5] = {0b0110010,0b1001001,0b1001001,0b1001001,0b0100110}; return g[col]; }
+    case 'T': { static const uint8_t g[5] = {0b1000000,0b1000000,0b1111111,0b1000000,0b1000000}; return g[col]; }
+    case 'U': { static const uint8_t g[5] = {0b1111110,0b0000001,0b0000001,0b0000001,0b1111110}; return g[col]; }
+    case 'V': { static const uint8_t g[5] = {0b1111000,0b0000110,0b0000001,0b0000110,0b1111000}; return g[col]; }
+    case 'W': { static const uint8_t g[5] = {0b1111110,0b0000001,0b0001110,0b0000001,0b1111110}; return g[col]; }
+    case 'X': { static const uint8_t g[5] = {0b1100011,0b0010100,0b0001000,0b0010100,0b1100011}; return g[col]; }
+    case 'Y': { static const uint8_t g[5] = {0b1100000,0b0010000,0b0001111,0b0010000,0b1100000}; return g[col]; }
+    case 'Z': { static const uint8_t g[5] = {0b1000011,0b1000101,0b1001001,0b1010001,0b1100001}; return g[col]; }
+    default: {
+        static const uint8_t g[5] = {0b0000010,0b1010101,0b0001000,0b1010101,0b0100000};
+        return g[col];
+    }
+    }
+}
+
+static void ade_tab_clear_text(struct tinywl_toplevel *toplevel) {
+    if (toplevel->tab_text_tree != NULL) {
+        wlr_scene_node_destroy(&toplevel->tab_text_tree->node);
+        toplevel->tab_text_tree = NULL;
+    }
+}
+
+static void ade_tab_clear_close(struct tinywl_toplevel *toplevel) {
+    if (toplevel->close_x_tree != NULL) {
+        wlr_scene_node_destroy(&toplevel->close_x_tree->node);
+        toplevel->close_x_tree = NULL;
+    }
+    if (toplevel->close_bg != NULL) {
+        wlr_scene_node_destroy(&toplevel->close_bg->node);
+        toplevel->close_bg = NULL;
+    }
+    if (toplevel->close_tree != NULL) {
+        wlr_scene_node_destroy(&toplevel->close_tree->node);
+        toplevel->close_tree = NULL;
+    }
+}
+
+static void ade_tab_build_close(struct tinywl_toplevel *toplevel, int tab_width) {
+    if (toplevel == NULL || toplevel->tab_tree == NULL) {
+        return;
+    }
+
+    ade_tab_clear_close(toplevel);
+
+    // Button geometry within the tab (LEFT side)
+    const int margin_left = 10;
+    const int btn_size = 16;  // square button
+    const int btn_y = 3;    // inside tab (tab y=-22 .. 0)
+    int btn_x = margin_left;
+
+    toplevel->close_tree = wlr_scene_tree_create(toplevel->tab_tree);
+
+    // Background: slightly darker yellow
+    float bg[4] = { 0.92f, 0.72f, 0.12f, 1.0f };
+    toplevel->close_bg = wlr_scene_rect_create(toplevel->close_tree, btn_size, btn_size, bg);
+    wlr_scene_node_set_position(&toplevel->close_bg->node, btn_x, btn_y);
+
+    // Draw the “X” as tiny rectangles
+    toplevel->close_x_tree = wlr_scene_tree_create(toplevel->close_tree);
+    float ink[4] = { 0.25f, 0.18f, 0.05f, 1.0f };
+    const int px = 2;
+    const int x0 = btn_x + 4;
+    const int y0 = btn_y + 4;
+
+    for (int i = 0; i < 6; i++) {
+        struct wlr_scene_rect *d1 = wlr_scene_rect_create(toplevel->close_x_tree, px, px, ink);
+        wlr_scene_node_set_position(&d1->node, x0 + i * px, y0 + i * px);
+
+        struct wlr_scene_rect *d2 = wlr_scene_rect_create(toplevel->close_x_tree, px, px, ink);
+        wlr_scene_node_set_position(&d2->node, x0 + (5 - i) * px, y0 + i * px);
+    }
+
+    wlr_scene_node_raise_to_top(&toplevel->close_tree->node);
+}
+
+static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *title) {
+    if (toplevel == NULL || toplevel->tab_tree == NULL) {
+        return;
+    }
+
+    // Remove previous text nodes
+    ade_tab_clear_text(toplevel);
+
+    if (title == NULL || title[0] == '\0') {
+        title = "APP";
+    }
+
+    // Create a subtree for the text so we can destroy/recreate easily.
+    toplevel->tab_text_tree = wlr_scene_tree_create(toplevel->tab_tree);
+
+    // Render settings
+    const int px = 2;            // "pixel" size
+    const int glyph_w = 5;
+    const int glyph_h = 7;
+    const int glyph_spacing = 1; // in font pixels
+
+    // Position inside the tab
+    // Leave space for the close button on the left, plus a small gap.
+    const int close_btn_w = 16;
+    const int close_btn_pad_left = 10;
+    const int close_btn_gap = 10;
+    const int left_pad = 14 + close_btn_pad_left + close_btn_w + close_btn_gap;
+    const int right_pad = 10;
+    int origin_x = left_pad;
+    int origin_y = 4; // inside tab (tab starts at -22)
+
+    // Text color: a darker brown-ish for contrast
+    float ink[4] = { 0.25f, 0.18f, 0.05f, 1.0f };
+
+    // Compute how many characters we will draw (hard clamp so tabs don't get huge)
+    const int max_chars = 32;
+    int title_len = 0;
+    while (title[title_len] != '\0' && title_len < max_chars) {
+        title_len++;
+    }
+
+    // Resize the yellow tab to fit the text (with clamps)
+    // Each character advances (glyph_w + glyph_spacing) "font pixels", scaled by px.
+    int char_advance = (glyph_w + glyph_spacing) * px;
+    int desired_w = left_pad + right_pad + title_len * char_advance;
+    const int min_w = 120;
+    const int max_w = 420;
+    if (desired_w < min_w) desired_w = min_w;
+    if (desired_w > max_w) desired_w = max_w;
+    
+    toplevel->tab_width_px = desired_w;
+
+    // Apply tab width
+    if (toplevel->tab_rect != NULL) {
+        // wlroots versions differ slightly; try the rect helper when available.
+        // If your build doesn't have wlr_scene_rect_set_size, switch to node-based sizing.
+        #ifdef WLR_HAVE_SCENE_RECT_SET_SIZE
+        wlr_scene_rect_set_size(toplevel->tab_rect, desired_w, 22);
+        #else
+        // Fallback: destroy & recreate the rect is overkill; keep constant 22px height.
+        // If this triggers a compile error, remove this block and rely on the helper.
+        wlr_scene_rect_set_size(toplevel->tab_rect, desired_w, 22);
+        #endif
+    }
+    
+    // Build/rebuild close button for this tab width
+    ade_tab_build_close(toplevel, desired_w);
+
+    for (int i = 0; title[i] != '\0' && i < title_len; i++) {
+        char c = title[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+
+        int char_x = origin_x + i * ( (glyph_w + glyph_spacing) * px );
+
+        for (int col = 0; col < glyph_w; col++) {
+            uint8_t mask = ade_font5x7_get(c, col);
+            for (int row = 0; row < glyph_h; row++) {
+                bool on = (mask >> row) & 0x1;
+                if (!on) continue;
+
+                struct wlr_scene_rect *dot = wlr_scene_rect_create(
+                    toplevel->tab_text_tree,
+                    px, px,
+                    ink
+                );
+                wlr_scene_node_set_position(
+                    &dot->node,
+                    char_x + col * px,
+                    origin_y + row * px
+                );
+            }
+        }
+    }
+
+    // Keep text above the tab rectangle
+    wlr_scene_node_raise_to_top(&toplevel->tab_text_tree->node);
+    if (toplevel->close_tree != NULL) {
+        wlr_scene_node_raise_to_top(&toplevel->close_tree->node);
+    }
 }
 
 
@@ -494,6 +742,16 @@ static struct tinywl_toplevel *desktop_toplevel_at(
     return tree->node.data;
 }
 
+static void begin_tab_drag(struct tinywl_toplevel *toplevel) {
+    struct tinywl_server *server = toplevel->server;
+    server->grabbed_toplevel = toplevel;
+    server->cursor_mode = TINYWL_CURSOR_TABDRAG;
+
+    // Grab relative to tab_tree position (tab_tree is in scene coords)
+    server->grab_x = server->cursor->x - toplevel->tab_tree->node.x;
+    server->grab_y = 0;
+}
+
 static void begin_interactive(struct tinywl_toplevel *toplevel,
         enum tinywl_cursor_mode mode, uint32_t edges);
 
@@ -569,6 +827,29 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
         return;
     } else if (server->cursor_mode == TINYWL_CURSOR_RESIZE) {
         process_cursor_resize(server);
+        return;
+    } else if (server->cursor_mode == TINYWL_CURSOR_TABDRAG) {
+        struct tinywl_toplevel *toplevel = server->grabbed_toplevel;
+        if (toplevel && toplevel->tab_tree && toplevel->xdg_toplevel) {
+            int desired_x = (int)(server->cursor->x - server->grab_x);
+
+            // Clamp within the window width (xdg geometry width)
+            struct wlr_box geo = toplevel->xdg_toplevel->base->geometry;
+            int win_w = geo.width;
+            if (win_w <= 0) win_w = 800;
+
+            int tab_w = (toplevel->tab_width_px > 0) ? toplevel->tab_width_px : 160;
+
+            int min_x = 0;
+            int max_x = win_w - tab_w;
+            if (max_x < min_x) max_x = min_x;
+
+            if (desired_x < min_x) desired_x = min_x;
+            if (desired_x > max_x) desired_x = max_x;
+
+            toplevel->tab_x_px = desired_x;
+            wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, -22);
+        }
         return;
     }
 
@@ -663,11 +944,31 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     }
 
     if (clicked_toplevel != NULL && event->button == BTN_LEFT) {
-        // If the node under the cursor is the BeOS tab, start moving the window.
-        if (node == &clicked_toplevel->tab_rect->node) {
-            focus_toplevel(clicked_toplevel);
-            begin_interactive(clicked_toplevel, TINYWL_CURSOR_MOVE, 0);
+        // Close button: click to request the client close.
+        if (clicked_toplevel->close_bg != NULL &&
+            node == &clicked_toplevel->close_bg->node) {
+            wlr_xdg_toplevel_send_close(clicked_toplevel->xdg_toplevel);
             return; // Do not send this click to clients
+        }
+
+        // If the node under the cursor is the BeOS tab, start moving the window.
+        if (clicked_toplevel->tab_rect != NULL &&
+            node == &clicked_toplevel->tab_rect->node) {
+            focus_toplevel(clicked_toplevel);
+
+            bool shift_down = false;
+            struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
+            if (kb != NULL) {
+                uint32_t mods = wlr_keyboard_get_modifiers(kb);
+                shift_down = (mods & WLR_MODIFIER_SHIFT) != 0;
+            }
+
+            if (shift_down) {
+                begin_tab_drag(clicked_toplevel);
+            } else {
+                begin_interactive(clicked_toplevel, TINYWL_CURSOR_MOVE, 0);
+            }
+            return;
         }
     }
 
@@ -868,6 +1169,9 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
         }
     }
 
+    // Render the window title into the yellow tab
+    ade_tab_render_title(toplevel, toplevel->xdg_toplevel->title);
+
     focus_toplevel(toplevel);
 }
 
@@ -887,6 +1191,11 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
     /* Called when a new surface state is committed. */
     struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, commit);
 
+    // Update tab title on commits (clients can set title after mapping)
+    if (toplevel->xdg_toplevel != NULL) {
+        ade_tab_render_title(toplevel, toplevel->xdg_toplevel->title);
+    }
+
     if (toplevel->xdg_toplevel->base->initial_commit) {
         /* When an xdg_surface performs an initial commit, the compositor must
          * reply with a configure so the client can map the surface. tinywl
@@ -900,7 +1209,11 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
     /* Called when the xdg_toplevel is destroyed. */
     struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
 
+    ade_tab_clear_text(toplevel);
+    ade_tab_clear_close(toplevel);
+
     wl_list_remove(&toplevel->map.link);
+    
     wl_list_remove(&toplevel->unmap.link);
     wl_list_remove(&toplevel->commit.link);
     wl_list_remove(&toplevel->destroy.link);
@@ -1005,30 +1318,39 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
         wlr_scene_xdg_surface_create(&toplevel->server->scene->tree, xdg_toplevel->base);
     toplevel->scene_tree->node.data = toplevel;
     xdg_toplevel->base->data = toplevel->scene_tree;
-    
+
     
     /* Create decoration tree above the window */
     toplevel->decor_tree =
         wlr_scene_tree_create(toplevel->scene_tree);
+    
+    /* Tab container (movable along the top edge) */
+    toplevel->tab_tree = wlr_scene_tree_create(toplevel->decor_tree);
+    toplevel->tab_x_px = 0;       // start left
+    toplevel->tab_width_px = 160; // default until title render computes
+    wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, -22);
 
-    /* BeOS-style yellow tab */
+    /* BeOS-style yellow tab (rect is inside tab_tree so it moves with it) */
     float yellow[4] = { 1.0f, 0.85f, 0.2f, 1.0f };
 
-    toplevel->tab_rect =
-        wlr_scene_rect_create(
-            toplevel->decor_tree,
-            120,   // tab width
-            22,    // tab height
-            yellow
-        );
-
-    /* Position tab slightly above window content */
-    wlr_scene_node_set_position(
-        &toplevel->tab_rect->node,
-        8,     // x offset
-        -22    // y offset (above window)
+    toplevel->tab_rect = wlr_scene_rect_create(
+        toplevel->tab_tree,
+        160,   // tab width
+        22,    // tab height
+        yellow
     );
-    
+
+    /* tab_rect at (0,0) inside tab_tree */
+    wlr_scene_node_set_position(&toplevel->tab_rect->node, 0, 0);
+
+    toplevel->tab_text_tree = NULL;
+    toplevel->close_tree = NULL;
+    toplevel->close_bg = NULL;
+    toplevel->close_x_tree = NULL;
+
+    ade_tab_render_title(toplevel, xdg_toplevel->title);
+
+    wlr_scene_node_raise_to_top(&toplevel->tab_tree->node);
 
     /* Listen to the various events it can emit */
     toplevel->map.notify = xdg_toplevel_map;
@@ -1161,6 +1483,25 @@ static void server_new_layer_surface(struct wl_listener *listener, void *data) {
     }
 }
 
+static void ade_update_background(struct tinywl_server *server) {
+    if (!server || !server->bg_rect) return;
+
+    int max_w = 0, max_h = 0;
+    struct tinywl_output *o = NULL;
+    wl_list_for_each(o, &server->outputs, link) {
+        int w = 0, h = 0;
+        wlr_output_effective_resolution(o->wlr_output, &w, &h);
+        if (w > max_w) max_w = w;
+        if (h > max_h) max_h = h;
+    }
+
+    if (max_w <= 0) max_w = 1920;
+    if (max_h <= 0) max_h = 1080;
+
+    wlr_scene_rect_set_size(server->bg_rect, max_w, max_h);
+    wlr_scene_node_lower_to_bottom(&server->bg_rect->node);
+}
+
 int main(int argc, char *argv[]) {
     wlr_log_init(WLR_DEBUG, NULL);
     char *startup_cmd = NULL;
@@ -1250,6 +1591,12 @@ int main(int argc, char *argv[]) {
     server.scene = wlr_scene_create();
     server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
 
+    // BeOS-like blue desktop background
+    float beos_blue[4] = { 0.1608f, 0.3137f, 0.5255f, 1.0f };
+    server.bg_rect = wlr_scene_rect_create(&server.scene->tree, 1920, 1080, beos_blue);
+    wlr_scene_node_set_position(&server.bg_rect->node, 0, 0);
+    wlr_scene_node_lower_to_bottom(&server.bg_rect->node);
+    
     
     /* Set up xdg-shell version 3. The xdg-shell is a Wayland protocol which is
      * used for application windows. For more detail on shells, refer to
