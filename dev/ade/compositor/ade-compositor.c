@@ -232,6 +232,27 @@ static void ade_spawn_shell(const char *sh_cmd) {
 // Forward declarations
 static void ade_update_background(struct tinywl_server *server);
 
+// Ensure the xcursor theme is loaded at the output scale.
+// If the cursor theme is only loaded at scale=1 on a HiDPI output,
+// the hotspot can be wrong (cursor appears offset; clicks don't land).
+static void ade_reload_cursor_for_output(struct tinywl_server *server, struct wlr_output *out) {
+    if (server == NULL || server->cursor_mgr == NULL || server->cursor == NULL) {
+        return;
+    }
+
+    int scale = 1;
+    if (out != NULL) {
+        float s = out->scale;
+        scale = (int)(s + 0.999f); // ceil without needing math.h
+        if (scale < 1) {
+            scale = 1;
+        }
+    }
+
+    wlr_xcursor_manager_load(server->cursor_mgr, scale);
+    wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
+}
+
 
 static bool ade_node_is_or_ancestor(struct wlr_scene_node *node, struct wlr_scene_node *target) {
     if (!node || !target) return false;
@@ -769,8 +790,13 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
     const int close_btn_w = 16;
     const int close_btn_pad_left = 10;
     const int close_btn_gap = 10;
+
+    const int expand_btn_w = 16;
+    const int expand_btn_pad_right = 10;
+    const int expand_btn_gap = 10;
+
     const int left_pad = 14 + close_btn_pad_left + close_btn_w + close_btn_gap;
-    const int right_pad = 10;
+    const int right_pad = expand_btn_pad_right + expand_btn_w + expand_btn_gap;
     int origin_x = left_pad;
     int origin_y = 4; // inside tab (tab starts at -22)
 
@@ -794,6 +820,8 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
 
     // Build/rebuild close button for this tab width
     ade_tab_build_close(toplevel, desired_w);
+    // Build/rebuild expand button for this tab width
+    ade_tab_build_expand(toplevel, desired_w);
 
     // Draw title using soft glyphs (pseudo-AA)
     const int max_chars = 24;
@@ -807,6 +835,9 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
     wlr_scene_node_raise_to_top(&toplevel->tab_text_tree->node);
     if (toplevel->close_tree != NULL) {
         wlr_scene_node_raise_to_top(&toplevel->close_tree->node);
+    }
+    if (toplevel->expand_tree != NULL) {
+        wlr_scene_node_raise_to_top(&toplevel->expand_tree->node);
     }
 }
 
@@ -853,6 +884,20 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel) {
             keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
     }
 }
+
+
+// -----------------------------------------------------------------------------
+// Clean shutdown handling
+// -----------------------------------------------------------------------------
+static struct wl_display *ade_global_display = NULL;
+
+static void ade_handle_signal(int sig) {
+    (void)sig;
+    if (ade_global_display != NULL) {
+        wl_display_terminate(ade_global_display);
+    }
+}
+
 
 static void keyboard_handle_modifiers(
         struct wl_listener *listener, void *data) {
@@ -1054,19 +1099,18 @@ static void server_new_input(struct wl_listener *listener, void *data) {
 static void seat_request_cursor(struct wl_listener *listener, void *data) {
     struct tinywl_server *server = wl_container_of(
             listener, server, request_cursor);
-    /* This event is raised by the seat when a client provides a cursor image */
+    /*
+     * Some clients provide their own cursor surfaces. Under some backends/VMs
+     * this can lead to inverted/offset cursors. For now, ignore client cursor
+     * requests and always use the compositor's xcursor theme.
+     */
     struct wlr_seat_pointer_request_set_cursor_event *event = data;
     struct wlr_seat_client *focused_client =
         server->seat->pointer_state.focused_client;
-    /* This can be sent by any client, so we check to make sure this one is
-     * actually has pointer focus first. */
+
     if (focused_client == event->seat_client) {
-        /* Once we've vetted the client, we can tell the cursor to use the
-         * provided surface as the cursor image. It will set the hardware cursor
-         * on the output that it's currently on and continue to do so as the
-         * cursor moves between outputs. */
-        wlr_cursor_set_surface(server->cursor, event->surface,
-                event->hotspot_x, event->hotspot_y);
+        // Keep a stable compositor cursor under nested/VM backends
+        wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
     }
 }
 
@@ -1518,15 +1562,27 @@ static void output_frame(struct wl_listener *listener, void *data) {
     wlr_scene_output_send_frame_done(scene_output, &now);
 }
 
+
 static void output_request_state(struct wl_listener *listener, void *data) {
-    /* This function is called when the backend requests a new state for
-     * the output. For example, Wayland and X11 backends request a new mode
-     * when the output window is resized. */
+    // Apply the backend-requested output state as-is. For nested/VM backends
+    // (Wayland/X11), forcing a transform here can result in an inverted output
+    // and mismatched pointer coordinates.
     struct tinywl_output *output = wl_container_of(listener, output, request_state);
     const struct wlr_output_event_request_state *event = data;
-    wlr_output_commit_state(output->wlr_output, event->state);
-    // Output size can change under Wayland/X11 backends; keep background in sync.
+
+    struct wlr_output_state state;
+    wlr_output_state_init(&state);
+    wlr_output_state_copy(&state, event->state);
+
+    // Commit the state requested by the backend. Forcing an output transform here can
+    // invert the output and break pointer coordinates under nested/VM backends.
+    wlr_output_commit_state(output->wlr_output, &state);
+
+    wlr_output_state_finish(&state);
+
+    // Output size/scale can change under Wayland/X11 backends; keep background and cursor in sync.
     ade_update_background(output->server);
+    ade_reload_cursor_for_output(output->server, output->wlr_output);
 }
 
 static bool ade_get_primary_output_size(struct tinywl_server *server, int *out_w, int *out_h) {
@@ -1572,7 +1628,6 @@ static void server_new_output(struct wl_listener *listener, void *data) {
     struct wlr_output_state state;
     wlr_output_state_init(&state);
     wlr_output_state_set_enabled(&state, true);
-
     /* Some backends don't have modes. DRM+KMS does, and we need to set a mode
      * before we can use the output. The mode is a tuple of (width, height,
      * refresh rate), and each monitor supports only a specific set of modes. We
@@ -1626,6 +1681,8 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 
     // Resize background to match the largest output now that we have one.
     ade_update_background(server);
+    // Load cursor theme for this output's scale.
+    ade_reload_cursor_for_output(server, wlr_output);
 
     int ow = 0, oh = 0;
     wlr_output_effective_resolution(wlr_output, &ow, &oh);
@@ -1741,6 +1798,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 
     ade_tab_clear_text(toplevel);
     ade_tab_clear_close(toplevel);
+    ade_tab_clear_expand(toplevel);
 
     // Destroy window border nodes
     if (toplevel->border_top) wlr_scene_node_destroy(&toplevel->border_top->node);
@@ -2060,8 +2118,9 @@ static void ade_update_background(struct tinywl_server *server) {
     wlr_scene_node_lower_to_bottom(&server->bg_rect->node);
 }
 
-
 int main(int argc, char *argv[]) {
+
+
     wlr_log_init(WLR_DEBUG, NULL);
     char *startup_cmd = NULL;
 
@@ -2100,6 +2159,13 @@ int main(int argc, char *argv[]) {
     /* The Wayland display is managed by libwayland. It handles accepting
      * clients from the Unix socket, manging Wayland globals, and so on. */
     server.wl_display = wl_display_create();
+    
+    // Allow Ctrl-C / kill / hangup to exit the compositor cleanly.
+    ade_global_display = server.wl_display;
+    signal(SIGINT, ade_handle_signal);
+    signal(SIGTERM, ade_handle_signal);
+    signal(SIGHUP, ade_handle_signal);
+    
     /* The backend is a wlroots feature which abstracts the underlying input and
      * output hardware. The autocreate option will choose the most suitable
      * backend based on the current environment, such as opening an X11 window
@@ -2229,6 +2295,8 @@ int main(int argc, char *argv[]) {
      * images are available at all scale factors on the screen (necessary for
      * HiDPI support). */
     server.cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
+    // Start with a sane compositor cursor at scale=1; outputs will reload at their scale.
+    ade_reload_cursor_for_output(&server, NULL);
 
     /*
      * wlr_cursor *only* displays an image on screen. It does not move around
@@ -2339,5 +2407,11 @@ int main(int argc, char *argv[]) {
     wlr_renderer_destroy(server.renderer);
     wlr_backend_destroy(server.backend);
     wl_display_destroy(server.wl_display);
+    
+    ade_global_display = NULL;
+    
     return 0;
 }
+
+// Cursor reload for output (handles per-output scale, wlroots 0.20 safe)
+static void ade_reload_cursor_for_output(struct tinywl_server *server, struct wlr_output *out);
