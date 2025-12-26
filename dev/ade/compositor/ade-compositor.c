@@ -118,6 +118,13 @@ struct tinywl_toplevel {
     struct wlr_scene_tree *close_tree;
     struct wlr_scene_rect *close_bg;
     struct wlr_scene_tree *close_x_tree;
+
+    // Simple gray window border (BeOS-style)
+    struct wlr_scene_rect *border_top;
+    struct wlr_scene_rect *border_bottom;
+    struct wlr_scene_rect *border_left;
+    struct wlr_scene_rect *border_right;
+
     struct wl_listener map;
     struct wl_listener unmap;
     struct wl_listener commit;
@@ -1196,6 +1203,29 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
         ade_tab_render_title(toplevel, toplevel->xdg_toplevel->title);
     }
 
+    // --- Window border geometry sync ---
+    struct wlr_box geo = toplevel->xdg_toplevel->base->geometry;
+    int w = geo.width;
+    int h = geo.height;
+    const int bw = 1;
+
+    if (toplevel->border_top) {
+        wlr_scene_rect_set_size(toplevel->border_top, w, bw);
+        wlr_scene_node_set_position(&toplevel->border_top->node, 0, -bw);
+    }
+    if (toplevel->border_bottom) {
+        wlr_scene_rect_set_size(toplevel->border_bottom, w, bw);
+        wlr_scene_node_set_position(&toplevel->border_bottom->node, 0, h);
+    }
+    if (toplevel->border_left) {
+        wlr_scene_rect_set_size(toplevel->border_left, bw, h);
+        wlr_scene_node_set_position(&toplevel->border_left->node, -bw, 0);
+    }
+    if (toplevel->border_right) {
+        wlr_scene_rect_set_size(toplevel->border_right, bw, h);
+        wlr_scene_node_set_position(&toplevel->border_right->node, w, 0);
+    }
+
     if (toplevel->xdg_toplevel->base->initial_commit) {
         /* When an xdg_surface performs an initial commit, the compositor must
          * reply with a configure so the client can map the surface. tinywl
@@ -1211,6 +1241,12 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 
     ade_tab_clear_text(toplevel);
     ade_tab_clear_close(toplevel);
+
+    // Destroy window border nodes
+    if (toplevel->border_top) wlr_scene_node_destroy(&toplevel->border_top->node);
+    if (toplevel->border_bottom) wlr_scene_node_destroy(&toplevel->border_bottom->node);
+    if (toplevel->border_left) wlr_scene_node_destroy(&toplevel->border_left->node);
+    if (toplevel->border_right) wlr_scene_node_destroy(&toplevel->border_right->node);
 
     wl_list_remove(&toplevel->map.link);
     
@@ -1323,7 +1359,27 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     /* Create decoration tree above the window */
     toplevel->decor_tree =
         wlr_scene_tree_create(toplevel->scene_tree);
-    
+
+    // Simple gray window border (BeOS-style)
+    float border_col[4] = { 0.65f, 0.65f, 0.65f, 1.0f };
+    const int bw = 1;
+    // geometry will be corrected on map/commit
+    struct wlr_box geo = xdg_toplevel->base->geometry;
+    int w = geo.width  > 0 ? geo.width  : 800;
+    int h = geo.height > 0 ? geo.height : 600;
+    // Top
+    toplevel->border_top = wlr_scene_rect_create(toplevel->decor_tree, w, bw, border_col);
+    wlr_scene_node_set_position(&toplevel->border_top->node, 0, -bw);
+    // Bottom
+    toplevel->border_bottom = wlr_scene_rect_create(toplevel->decor_tree, w, bw, border_col);
+    wlr_scene_node_set_position(&toplevel->border_bottom->node, 0, h);
+    // Left
+    toplevel->border_left = wlr_scene_rect_create(toplevel->decor_tree, bw, h, border_col);
+    wlr_scene_node_set_position(&toplevel->border_left->node, -bw, 0);
+    // Right
+    toplevel->border_right = wlr_scene_rect_create(toplevel->decor_tree, bw, h, border_col);
+    wlr_scene_node_set_position(&toplevel->border_right->node, w, 0);
+
     /* Tab container (movable along the top edge) */
     toplevel->tab_tree = wlr_scene_tree_create(toplevel->decor_tree);
     toplevel->tab_x_px = 0;       // start left
