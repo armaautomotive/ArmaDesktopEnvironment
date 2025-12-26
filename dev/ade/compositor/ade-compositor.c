@@ -1472,6 +1472,140 @@ static char *ade_trim(char *s) {
     return s;
 }
 
+// -----------------------------------------------------------------------------
+// Tiny 5x7 bitmap font for desktop icon labels (rect-based, no font deps)
+// -----------------------------------------------------------------------------
+
+static const uint8_t *ade_glyph_5x7(char c) {
+    // Each glyph is 7 rows, 5 bits used per row (MSB on the left in the low 5 bits)
+    // Only a small subset is implemented; unknown chars map to '?'.
+    static const uint8_t GLYPH_SPACE[7] = {0,0,0,0,0,0,0};
+    static const uint8_t GLYPH_QMARK[7] = {0x0E,0x11,0x01,0x02,0x04,0x00,0x04};
+
+    // Digits 0-9
+    static const uint8_t GLYPH_0[7] = {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E};
+    static const uint8_t GLYPH_1[7] = {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E};
+    static const uint8_t GLYPH_2[7] = {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F};
+    static const uint8_t GLYPH_3[7] = {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E};
+    static const uint8_t GLYPH_4[7] = {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02};
+    static const uint8_t GLYPH_5[7] = {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E};
+    static const uint8_t GLYPH_6[7] = {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E};
+    static const uint8_t GLYPH_7[7] = {0x1F,0x01,0x02,0x04,0x08,0x08,0x08};
+    static const uint8_t GLYPH_8[7] = {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E};
+    static const uint8_t GLYPH_9[7] = {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C};
+
+    // Uppercase A-Z (subset that covers most app names well)
+    static const uint8_t GLYPH_A[7] = {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11};
+    static const uint8_t GLYPH_B[7] = {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E};
+    static const uint8_t GLYPH_C[7] = {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E};
+    static const uint8_t GLYPH_D[7] = {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E};
+    static const uint8_t GLYPH_E[7] = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F};
+    static const uint8_t GLYPH_F[7] = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10};
+    static const uint8_t GLYPH_G[7] = {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F};
+    static const uint8_t GLYPH_H[7] = {0x11,0x11,0x11,0x1F,0x11,0x11,0x11};
+    static const uint8_t GLYPH_I[7] = {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E};
+    static const uint8_t GLYPH_J[7] = {0x07,0x02,0x02,0x02,0x02,0x12,0x0C};
+    static const uint8_t GLYPH_K[7] = {0x11,0x12,0x14,0x18,0x14,0x12,0x11};
+    static const uint8_t GLYPH_L[7] = {0x10,0x10,0x10,0x10,0x10,0x10,0x1F};
+    static const uint8_t GLYPH_M[7] = {0x11,0x1B,0x15,0x15,0x11,0x11,0x11};
+    static const uint8_t GLYPH_N[7] = {0x11,0x19,0x15,0x13,0x11,0x11,0x11};
+    static const uint8_t GLYPH_O[7] = {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E};
+    static const uint8_t GLYPH_P[7] = {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10};
+    static const uint8_t GLYPH_Q[7] = {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D};
+    static const uint8_t GLYPH_R[7] = {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11};
+    static const uint8_t GLYPH_S[7] = {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E};
+    static const uint8_t GLYPH_T[7] = {0x1F,0x04,0x04,0x04,0x04,0x04,0x04};
+    static const uint8_t GLYPH_U[7] = {0x11,0x11,0x11,0x11,0x11,0x11,0x0E};
+    static const uint8_t GLYPH_V[7] = {0x11,0x11,0x11,0x11,0x11,0x0A,0x04};
+    static const uint8_t GLYPH_W[7] = {0x11,0x11,0x11,0x15,0x15,0x1B,0x11};
+    static const uint8_t GLYPH_X[7] = {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11};
+    static const uint8_t GLYPH_Y[7] = {0x11,0x11,0x0A,0x04,0x04,0x04,0x04};
+    static const uint8_t GLYPH_Z[7] = {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F};
+
+    static const uint8_t GLYPH_DOT[7]  = {0,0,0,0,0,0,0x04};
+    static const uint8_t GLYPH_DASH[7] = {0,0,0,0x1F,0,0,0};
+    static const uint8_t GLYPH_UND[7]  = {0,0,0,0,0,0,0x1F};
+
+    if (c == ' ') return GLYPH_SPACE;
+    if (c == '.') return GLYPH_DOT;
+    if (c == '-') return GLYPH_DASH;
+    if (c == '_') return GLYPH_UND;
+
+    if (c >= 'a' && c <= 'z') c = (char)(c - 32); // map to uppercase glyphs
+
+    switch (c) {
+        case '0': return GLYPH_0;
+        case '1': return GLYPH_1;
+        case '2': return GLYPH_2;
+        case '3': return GLYPH_3;
+        case '4': return GLYPH_4;
+        case '5': return GLYPH_5;
+        case '6': return GLYPH_6;
+        case '7': return GLYPH_7;
+        case '8': return GLYPH_8;
+        case '9': return GLYPH_9;
+        case 'A': return GLYPH_A;
+        case 'B': return GLYPH_B;
+        case 'C': return GLYPH_C;
+        case 'D': return GLYPH_D;
+        case 'E': return GLYPH_E;
+        case 'F': return GLYPH_F;
+        case 'G': return GLYPH_G;
+        case 'H': return GLYPH_H;
+        case 'I': return GLYPH_I;
+        case 'J': return GLYPH_J;
+        case 'K': return GLYPH_K;
+        case 'L': return GLYPH_L;
+        case 'M': return GLYPH_M;
+        case 'N': return GLYPH_N;
+        case 'O': return GLYPH_O;
+        case 'P': return GLYPH_P;
+        case 'Q': return GLYPH_Q;
+        case 'R': return GLYPH_R;
+        case 'S': return GLYPH_S;
+        case 'T': return GLYPH_T;
+        case 'U': return GLYPH_U;
+        case 'V': return GLYPH_V;
+        case 'W': return GLYPH_W;
+        case 'X': return GLYPH_X;
+        case 'Y': return GLYPH_Y;
+        case 'Z': return GLYPH_Z;
+        default:  return GLYPH_QMARK;
+    }
+}
+
+static int ade_text5x7_width_px(const char *text, int scale, int spacing) {
+    if (!text) return 0;
+    int len = (int)strlen(text);
+    if (len <= 0) return 0;
+    int glyph_w = 5 * scale;
+    int step = glyph_w + spacing;
+    return (len * step) - spacing;
+}
+
+static void ade_scene_draw_text5x7(struct wlr_scene_tree *parent, int x, int y,
+                                  int scale, int spacing,
+                                  const float color[4], const char *text) {
+    if (!parent || !text) return;
+    int pen_x = x;
+    for (const char *p = text; *p; p++) {
+        const uint8_t *g = ade_glyph_5x7(*p);
+        for (int row = 0; row < 7; row++) {
+            uint8_t bits = g[row] & 0x1F;
+            for (int col = 0; col < 5; col++) {
+                if (bits & (1u << (4 - col))) {
+                    struct wlr_scene_rect *px = wlr_scene_rect_create(parent, scale, scale, color);
+                    if (px) {
+                        wlr_scene_node_set_position(&px->node, pen_x + col * scale, y + row * scale);
+                        // IMPORTANT: do not set node.data here; clicks should resolve to the icon's tree data.
+                    }
+                }
+            }
+        }
+        pen_x += (5 * scale) + spacing;
+    }
+}
+
 static struct ade_desktop_icon *ade_desktop_icon_from_scene_node(struct wlr_scene_node *node) {
     struct wlr_scene_node *n = node;
     while (n != NULL) {
@@ -1515,39 +1649,94 @@ static void ade_load_desktop_icons_from_conf(struct tinywl_server *server, const
 
         int x = 0, y = 0;
         char png[512];
+        char label_raw[256];
         png[0] = '\0';
-        if (sscanf(left, "%d %d %511s", &x, &y, png) != 3) continue;
+        label_raw[0] = '\0';
+
+        // Allow optional label after the png path:
+        //   x y path/to/icon.png My Label Here
+        // (label continues until the '|' split; we already split that out)
+        int n = sscanf(left, "%d %d %511s %255[^\n]", &x, &y, png, label_raw);
+        if (n < 3) continue;
+
+        char *label = NULL;
+        if (n >= 4) {
+            label = ade_trim(label_raw);
+            // strip surrounding quotes if present
+            if (label[0] == '"') {
+                label++;
+                size_t L = strlen(label);
+                if (L > 0 && label[L - 1] == '"') {
+                    label[L - 1] = '\0';
+                }
+                label = ade_trim(label);
+            }
+        }
+        if (label == NULL || *label == '\0') {
+            label = "APP"; // default so we can prove labels render even if config label missing
+        }
 
         struct ade_desktop_icon *ic = calloc(1, sizeof(*ic));
         if (!ic) continue;
-
         ic->exec_cmd = strdup(right);
 
-        // Try PNG first
+        // Create a per-icon tree so icon + label move together and clicks on label still hit the icon.
+        struct wlr_scene_tree *icon_tree = wlr_scene_tree_create(server->desktop_icons);
+        if (!icon_tree) {
+            ade_free_desktop_icon(ic);
+            continue;
+        }
+        wlr_scene_node_set_position(&icon_tree->node, x, y);
+        icon_tree->node.data = ic;        // hit-testing anchor
+        ic->node = &icon_tree->node;      // drag this tree
+
+        // Try PNG first (placed at 0,0 inside icon_tree)
+        bool placed = false;
         struct wlr_buffer *icon_buf = ade_load_png_as_wlr_buffer(png);
         if (icon_buf != NULL) {
-            struct wlr_scene_buffer *sb = wlr_scene_buffer_create(server->desktop_icons, icon_buf);
+            struct wlr_scene_buffer *sb = wlr_scene_buffer_create(icon_tree, icon_buf);
             wlr_buffer_drop(icon_buf);
-
             if (sb != NULL) {
-                wlr_scene_node_set_position(&sb->node, x, y);
-                ic->node = &sb->node;
-                ic->node->data = ic; // tag for hit-testing
-                continue;
+                wlr_scene_node_set_position(&sb->node, 0, 0);
+                placed = true;
             }
         }
 
         // Fallback: placeholder rect
-        const float col[4] = { 0.80f, 0.80f, 0.80f, 1.0f };
-        struct wlr_scene_rect *r = wlr_scene_rect_create(server->desktop_icons, 48, 48, col);
-        if (r != NULL) {
-            wlr_scene_node_set_position(&r->node, x, y);
-            ic->node = &r->node;
-            ic->node->data = ic;
+        if (!placed) {
+            const float col[4] = { 0.80f, 0.80f, 0.80f, 1.0f };
+            struct wlr_scene_rect *r = wlr_scene_rect_create(icon_tree, 48, 48, col);
+            if (r != NULL) {
+                wlr_scene_node_set_position(&r->node, 0, 0);
+                placed = true;
+            }
+        }
+
+        // If we still couldn't place anything, clean up
+        if (!placed) {
+            wlr_scene_node_destroy(&icon_tree->node);
+            ade_free_desktop_icon(ic);
             continue;
         }
 
-        ade_free_desktop_icon(ic);
+        // Bitmap label under the icon (centered under a 48px icon box)
+        const int icon_box_w = 48;
+        const int label_y = 52; // a few px below the 48px icon
+        const int scale = 2;
+        const int spacing = 1;
+        int tw = ade_text5x7_width_px(label, scale, spacing);
+        int tx = (icon_box_w / 2) - (tw / 2);
+        if (tx < 0) tx = 0;
+
+        // BeOS-ish: white text with a subtle dark shadow behind it
+        const float shadow[4] = { 0.0f, 0.0f, 0.0f, 0.55f };
+        const float textcol[4] = { 0.98f, 0.98f, 0.98f, 1.0f };
+        ade_scene_draw_text5x7(icon_tree, tx + 1, label_y + 1, scale, spacing, shadow, label);
+        ade_scene_draw_text5x7(icon_tree, tx,     label_y,     scale, spacing, textcol, label);
+
+        // keep icons above background
+        wlr_scene_node_raise_to_top(&icon_tree->node);
+        continue;
     }
 
     fclose(f);

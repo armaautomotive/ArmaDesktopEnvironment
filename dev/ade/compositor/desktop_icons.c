@@ -113,201 +113,99 @@ static bool parse_line(char *line, struct ade_desktop_icon *out) {
     return out->png_path && out->exec_cmd;
 }
 
-// --- Bitmap font rendering for desktop icon labels ---
-// Tiny 5x7 font packed into 8 rows (LSB on the right). Only includes common ASCII.
-// Characters not present render as a small box.
-static uint8_t ade_font5x7_get_row(char c, int row) {
-    // row: 0..6
-    // Return 5-bit row pattern in bits 4..0
-    // NOTE: Hand-authored minimal font for: space, .,-,_,0-9,A-Z,a-z
-    // Fallback: box.
-
-    // Space
-    if (c == ' ') {
-        return 0;
-    }
-
-    // Punctuation
-    if (c == '.') {
-        static const uint8_t p[7] = {0,0,0,0,0,0,0b00100};
-        return p[row];
-    }
-    if (c == '-') {
-        static const uint8_t p[7] = {0,0,0,0b11111,0,0,0};
-        return p[row];
-    }
-    if (c == '_') {
-        static const uint8_t p[7] = {0,0,0,0,0,0,0b11111};
-        return p[row];
-    }
-    if (c == '/') {
-        static const uint8_t p[7] = {0b00001,0b00010,0b00100,0b01000,0b10000,0,0};
-        return p[row];
-    }
-
-    // Digits 0-9
-    if (c >= '0' && c <= '9') {
-        switch (c) {
-            case '0': { static const uint8_t p[7]={0b01110,0b10001,0b10011,0b10101,0b11001,0b10001,0b01110}; return p[row]; }
-            case '1': { static const uint8_t p[7]={0b00100,0b01100,0b00100,0b00100,0b00100,0b00100,0b01110}; return p[row]; }
-            case '2': { static const uint8_t p[7]={0b01110,0b10001,0b00001,0b00010,0b00100,0b01000,0b11111}; return p[row]; }
-            case '3': { static const uint8_t p[7]={0b11110,0b00001,0b00001,0b01110,0b00001,0b00001,0b11110}; return p[row]; }
-            case '4': { static const uint8_t p[7]={0b00010,0b00110,0b01010,0b10010,0b11111,0b00010,0b00010}; return p[row]; }
-            case '5': { static const uint8_t p[7]={0b11111,0b10000,0b10000,0b11110,0b00001,0b00001,0b11110}; return p[row]; }
-            case '6': { static const uint8_t p[7]={0b01110,0b10000,0b10000,0b11110,0b10001,0b10001,0b01110}; return p[row]; }
-            case '7': { static const uint8_t p[7]={0b11111,0b00001,0b00010,0b00100,0b01000,0b01000,0b01000}; return p[row]; }
-            case '8': { static const uint8_t p[7]={0b01110,0b10001,0b10001,0b01110,0b10001,0b10001,0b01110}; return p[row]; }
-            case '9': { static const uint8_t p[7]={0b01110,0b10001,0b10001,0b01111,0b00001,0b00001,0b01110}; return p[row]; }
-        }
-    }
-
-    // Uppercase A-Z
-    if (c >= 'A' && c <= 'Z') {
-        switch (c) {
-            case 'A': { static const uint8_t p[7]={0b01110,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001}; return p[row]; }
-            case 'B': { static const uint8_t p[7]={0b11110,0b10001,0b10001,0b11110,0b10001,0b10001,0b11110}; return p[row]; }
-            case 'C': { static const uint8_t p[7]={0b01111,0b10000,0b10000,0b10000,0b10000,0b10000,0b01111}; return p[row]; }
-            case 'D': { static const uint8_t p[7]={0b11110,0b10001,0b10001,0b10001,0b10001,0b10001,0b11110}; return p[row]; }
-            case 'E': { static const uint8_t p[7]={0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b11111}; return p[row]; }
-            case 'F': { static const uint8_t p[7]={0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b10000}; return p[row]; }
-            case 'G': { static const uint8_t p[7]={0b01111,0b10000,0b10000,0b10011,0b10001,0b10001,0b01111}; return p[row]; }
-            case 'H': { static const uint8_t p[7]={0b10001,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001}; return p[row]; }
-            case 'I': { static const uint8_t p[7]={0b01110,0b00100,0b00100,0b00100,0b00100,0b00100,0b01110}; return p[row]; }
-            case 'J': { static const uint8_t p[7]={0b00001,0b00001,0b00001,0b00001,0b10001,0b10001,0b01110}; return p[row]; }
-            case 'K': { static const uint8_t p[7]={0b10001,0b10010,0b10100,0b11000,0b10100,0b10010,0b10001}; return p[row]; }
-            case 'L': { static const uint8_t p[7]={0b10000,0b10000,0b10000,0b10000,0b10000,0b10000,0b11111}; return p[row]; }
-            case 'M': { static const uint8_t p[7]={0b10001,0b11011,0b10101,0b10101,0b10001,0b10001,0b10001}; return p[row]; }
-            case 'N': { static const uint8_t p[7]={0b10001,0b11001,0b10101,0b10011,0b10001,0b10001,0b10001}; return p[row]; }
-            case 'O': { static const uint8_t p[7]={0b01110,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110}; return p[row]; }
-            case 'P': { static const uint8_t p[7]={0b11110,0b10001,0b10001,0b11110,0b10000,0b10000,0b10000}; return p[row]; }
-            case 'Q': { static const uint8_t p[7]={0b01110,0b10001,0b10001,0b10001,0b10101,0b10010,0b01101}; return p[row]; }
-            case 'R': { static const uint8_t p[7]={0b11110,0b10001,0b10001,0b11110,0b10100,0b10010,0b10001}; return p[row]; }
-            case 'S': { static const uint8_t p[7]={0b01111,0b10000,0b10000,0b01110,0b00001,0b00001,0b11110}; return p[row]; }
-            case 'T': { static const uint8_t p[7]={0b11111,0b00100,0b00100,0b00100,0b00100,0b00100,0b00100}; return p[row]; }
-            case 'U': { static const uint8_t p[7]={0b10001,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110}; return p[row]; }
-            case 'V': { static const uint8_t p[7]={0b10001,0b10001,0b10001,0b10001,0b10001,0b01010,0b00100}; return p[row]; }
-            case 'W': { static const uint8_t p[7]={0b10001,0b10001,0b10001,0b10101,0b10101,0b11011,0b10001}; return p[row]; }
-            case 'X': { static const uint8_t p[7]={0b10001,0b10001,0b01010,0b00100,0b01010,0b10001,0b10001}; return p[row]; }
-            case 'Y': { static const uint8_t p[7]={0b10001,0b10001,0b01010,0b00100,0b00100,0b00100,0b00100}; return p[row]; }
-            case 'Z': { static const uint8_t p[7]={0b11111,0b00001,0b00010,0b00100,0b01000,0b10000,0b11111}; return p[row]; }
-        }
-    }
-
-    // Lowercase a-z (simple, legible)
-    if (c >= 'a' && c <= 'z') {
-        switch (c) {
-            case 'a': { static const uint8_t p[7]={0,0,0b01110,0b00001,0b01111,0b10001,0b01111}; return p[row]; }
-            case 'b': { static const uint8_t p[7]={0b10000,0b10000,0b11110,0b10001,0b10001,0b10001,0b11110}; return p[row]; }
-            case 'c': { static const uint8_t p[7]={0,0,0b01111,0b10000,0b10000,0b10000,0b01111}; return p[row]; }
-            case 'd': { static const uint8_t p[7]={0b00001,0b00001,0b01111,0b10001,0b10001,0b10001,0b01111}; return p[row]; }
-            case 'e': { static const uint8_t p[7]={0,0,0b01110,0b10001,0b11111,0b10000,0b01111}; return p[row]; }
-            case 'f': { static const uint8_t p[7]={0b00110,0b01001,0b01000,0b11100,0b01000,0b01000,0b01000}; return p[row]; }
-            case 'g': { static const uint8_t p[7]={0,0,0b01111,0b10001,0b10001,0b01111,0b00001}; return p[row]; }
-            case 'h': { static const uint8_t p[7]={0b10000,0b10000,0b11110,0b10001,0b10001,0b10001,0b10001}; return p[row]; }
-            case 'i': { static const uint8_t p[7]={0b00100,0,0b01100,0b00100,0b00100,0b00100,0b01110}; return p[row]; }
-            case 'j': { static const uint8_t p[7]={0b00010,0,0b00110,0b00010,0b00010,0b10010,0b01100}; return p[row]; }
-            case 'k': { static const uint8_t p[7]={0b10000,0b10000,0b10010,0b10100,0b11000,0b10100,0b10010}; return p[row]; }
-            case 'l': { static const uint8_t p[7]={0b01100,0b00100,0b00100,0b00100,0b00100,0b00100,0b01110}; return p[row]; }
-            case 'm': { static const uint8_t p[7]={0,0,0b11010,0b10101,0b10101,0b10101,0b10101}; return p[row]; }
-            case 'n': { static const uint8_t p[7]={0,0,0b11110,0b10001,0b10001,0b10001,0b10001}; return p[row]; }
-            case 'o': { static const uint8_t p[7]={0,0,0b01110,0b10001,0b10001,0b10001,0b01110}; return p[row]; }
-            case 'p': { static const uint8_t p[7]={0,0,0b11110,0b10001,0b10001,0b11110,0b10000}; return p[row]; }
-            case 'q': { static const uint8_t p[7]={0,0,0b01111,0b10001,0b10001,0b01111,0b00001}; return p[row]; }
-            case 'r': { static const uint8_t p[7]={0,0,0b10111,0b11000,0b10000,0b10000,0b10000}; return p[row]; }
-            case 's': { static const uint8_t p[7]={0,0,0b01111,0b10000,0b01110,0b00001,0b11110}; return p[row]; }
-            case 't': { static const uint8_t p[7]={0b01000,0b01000,0b11100,0b01000,0b01000,0b01001,0b00110}; return p[row]; }
-            case 'u': { static const uint8_t p[7]={0,0,0b10001,0b10001,0b10001,0b10011,0b01101}; return p[row]; }
-            case 'v': { static const uint8_t p[7]={0,0,0b10001,0b10001,0b10001,0b01010,0b00100}; return p[row]; }
-            case 'w': { static const uint8_t p[7]={0,0,0b10001,0b10001,0b10101,0b11011,0b10001}; return p[row]; }
-            case 'x': { static const uint8_t p[7]={0,0,0b10001,0b01010,0b00100,0b01010,0b10001}; return p[row]; }
-            case 'y': { static const uint8_t p[7]={0,0,0b10001,0b10001,0b10001,0b01111,0b00001}; return p[row]; }
-            case 'z': { static const uint8_t p[7]={0,0,0b11111,0b00010,0b00100,0b01000,0b11111}; return p[row]; }
-        }
-    }
-
-    // Fallback: small box
-    static const uint8_t box[7] = {0b11111,0b10001,0b10001,0b10001,0b10001,0b10001,0b11111};
-    return box[row];
-}
-
-static inline void ade_put_pixel_argb(uint8_t *dst, int stride, int x, int y, uint8_t a, uint8_t r, uint8_t g, uint8_t b) {
-    uint8_t *p = dst + y * stride + x * 4;
-    // ARGB32 in memory is platform-endian for Cairo, but wlroots expects WL_SHM_FORMAT_ARGB8888
-    // which is 0xAARRGGBB in 32-bit. For little-endian, bytes are BB GG RR AA.
-    // We'll write in that byte order to be safe on typical LE.
-    p[0] = b;
-    p[1] = g;
-    p[2] = r;
-    p[3] = a;
-}
-
+// --- Antialiased Cairo/Pango rendering for desktop icon labels ---
+// Renders into a transparent ARGB8888 buffer (with a subtle shadow).
 static struct wlr_buffer *make_label_buffer(const char *text, int *out_w, int *out_h) {
     if (!text || !*text) return NULL;
 
-    // Layout: fixed-size bitmap font with optional background
-    const int glyph_w = 5;
-    const int glyph_h = 7;
-    const int scale = 2;              // 2x scale so it doesn't look tiny
-    const int gap = 1 * scale;        // gap between glyphs
-    const int pad_x = 6;              // padding around text
-    const int pad_y = 4;
+    // Tuning knobs
+    const int pad_x = 4;
+    const int pad_y = 2;
+    const int shadow_dx = 1;
+    const int shadow_dy = 1;
+    const int max_chars = 64;
 
     // Clamp length so we don't allocate silly buffers
-    const size_t max_chars = 64;
+    char tmp[128];
     size_t n = strlen(text);
-    if (n > max_chars) n = max_chars;
+    if (n > (size_t)max_chars) n = (size_t)max_chars;
+    memcpy(tmp, text, n);
+    tmp[n] = '\0';
 
-    const int text_w = (int)n * (glyph_w * scale) + (int)(n ? (n - 1) : 0) * gap;
-    const int text_h = glyph_h * scale;
+    // Create a tiny scratch surface to measure text
+    cairo_surface_t *scratch = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+    cairo_t *cr0 = cairo_create(scratch);
 
-    const int W = text_w + pad_x * 2;
-    const int H = text_h + pad_y * 2;
+    PangoLayout *layout0 = pango_cairo_create_layout(cr0);
+    PangoFontDescription *desc = pango_font_description_from_string("Sans 9");
+    pango_layout_set_font_description(layout0, desc);
+    pango_layout_set_text(layout0, tmp, -1);
+    pango_layout_set_single_paragraph_mode(layout0, TRUE);
+    pango_layout_set_wrap(layout0, PANGO_WRAP_WORD_CHAR);
 
-    const int stride = W * 4;
-    uint8_t *pixels = calloc(1, (size_t)stride * (size_t)H);
-    if (!pixels) return NULL;
+    int tw = 0, th = 0;
+    pango_layout_get_pixel_size(layout0, &tw, &th);
 
-    // Background: subtle dark rounded-rect vibe (rectangular for now)
-    // ARGB8888 bytes: BB GG RR AA
-    for (int y = 0; y < H; y++) {
-        for (int x = 0; x < W; x++) {
-            ade_put_pixel_argb(pixels, stride, x, y, 140, 0, 0, 0); // ~55% black
-        }
+    g_object_unref(layout0);
+    pango_font_description_free(desc);
+    cairo_destroy(cr0);
+    cairo_surface_destroy(scratch);
+
+    if (tw <= 0 || th <= 0) return NULL;
+
+    int W = tw + pad_x * 2 + shadow_dx;
+    int H = th + pad_y * 2 + shadow_dy;
+    if (W < 1) W = 1;
+    if (H < 1) H = 1;
+
+    cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, W, H);
+    cairo_t *cr = cairo_create(surface);
+
+    // Ensure we start fully transparent
+    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+    // Make sure antialiasing is enabled
+    cairo_font_options_t *fopt = cairo_font_options_create();
+    cairo_font_options_set_antialias(fopt, CAIRO_ANTIALIAS_SUBPIXEL);
+    cairo_set_font_options(cr, fopt);
+    cairo_font_options_destroy(fopt);
+
+    PangoLayout *layout = pango_cairo_create_layout(cr);
+    PangoFontDescription *desc2 = pango_font_description_from_string("Sans 9");
+    pango_layout_set_font_description(layout, desc2);
+    pango_layout_set_text(layout, tmp, -1);
+
+    // Center inside the label buffer
+    pango_layout_set_alignment(layout, PANGO_ALIGN_CENTER);
+    pango_layout_set_width(layout, (W - pad_x * 2) * PANGO_SCALE);
+
+    // Shadow
+    cairo_set_source_rgba(cr, 0, 0, 0, 0.75);
+    cairo_move_to(cr, pad_x + shadow_dx, pad_y + shadow_dy);
+    pango_cairo_show_layout(cr, layout);
+
+    // Foreground (white)
+    cairo_set_source_rgba(cr, 1, 1, 1, 1);
+    cairo_move_to(cr, pad_x, pad_y);
+    pango_cairo_show_layout(cr, layout);
+
+    g_object_unref(layout);
+    pango_font_description_free(desc2);
+
+    cairo_destroy(cr);
+    cairo_surface_flush(surface);
+
+    const int stride = cairo_image_surface_get_stride(surface);
+    const uint8_t *src = cairo_image_surface_get_data(surface);
+
+    uint8_t *pixels = malloc((size_t)stride * (size_t)H);
+    if (!pixels) {
+        cairo_surface_destroy(surface);
+        return NULL;
     }
-
-    // Draw text in white with a tiny shadow for readability
-    const int base_x = pad_x;
-    const int base_y = pad_y;
-
-    for (size_t i = 0; i < n; i++) {
-        char c = text[i];
-        int ox = base_x + (int)i * ((glyph_w * scale) + gap);
-        int oy = base_y;
-
-        for (int row = 0; row < glyph_h; row++) {
-            uint8_t bits = ade_font5x7_get_row(c, row);
-            for (int col = 0; col < glyph_w; col++) {
-                bool on = (bits >> (glyph_w - 1 - col)) & 1;
-                if (!on) continue;
-
-                // Shadow (1px down-right)
-                for (int sy = 0; sy < scale; sy++) {
-                    for (int sx = 0; sx < scale; sx++) {
-                        int px = ox + col * scale + sx;
-                        int py = oy + row * scale + sy;
-                        int shx = px + 1;
-                        int shy = py + 1;
-                        if (shx >= 0 && shx < W && shy >= 0 && shy < H) {
-                            ade_put_pixel_argb(pixels, stride, shx, shy, 200, 0, 0, 0);
-                        }
-                        if (px >= 0 && px < W && py >= 0 && py < H) {
-                            ade_put_pixel_argb(pixels, stride, px, py, 255, 255, 255, 255);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    memcpy(pixels, src, (size_t)stride * (size_t)H);
 
     struct wlr_buffer *buf = wlr_buffer_from_pixels(
         WL_SHM_FORMAT_ARGB8888,
@@ -318,8 +216,9 @@ static struct wlr_buffer *make_label_buffer(const char *text, int *out_w, int *o
 
     // NOTE: wlroots may keep a reference to the provided pixel data.
     // Keep `pixels` alive for the lifetime of the buffer.
-    // (Small, bounded leak for now; can be replaced later with a custom wlr_buffer impl + destroy.)
     (void)pixels;
+
+    cairo_surface_destroy(surface);
 
     if (out_w) *out_w = W;
     if (out_h) *out_h = H;
@@ -411,7 +310,7 @@ static void build_icon_scene(struct tinywl_server *server, struct ade_desktop_ic
 
             // Position using the *buffer* dimensions so the label actually centers under the icon
             int lx = ic->x + (ic->icon_w / 2) - (ic->label_w / 2);
-            int ly = ic->y + ic->icon_h + 4;
+            int ly = ic->y + ic->icon_h + 8;
             if (lx < 0) lx = 0;
             if (ly < 0) ly = 0;
 
@@ -431,7 +330,8 @@ static void build_icon_scene(struct tinywl_server *server, struct ade_desktop_ic
         int sel_w = ic->icon_w + 16;
         int sel_h = ic->icon_h + 16;
         if (ic->label_h > 0) {
-            sel_h = ic->icon_h + 4 + ic->label_h + 16;
+            // Label is positioned at (icon_h + 8), so include that offset in the selection bounds
+            sel_h = ic->icon_h + 8 + ic->label_h + 16;
             int want_w = ic->label_w + 16;
             if (want_w > sel_w) sel_w = want_w;
         }
