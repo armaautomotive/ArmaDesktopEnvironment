@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <time.h>
 #include <unistd.h>
 #include <getopt.h>
@@ -55,6 +56,8 @@
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 #include <wlr/render/wlr_texture.h>
+
+#include "desktop_icons.h"
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum tinywl_cursor_mode {
@@ -137,6 +140,11 @@ struct tinywl_server {
     int deskbar_app_count;
     int deskbar_width;
     int deskbar_height;
+    
+    struct ade_desktop_icons desktop_icons_state;
+    char desktop_icons_conf_path[512];
+    
+    struct ade_desktop_icon *last_clicked_icon;
 };
 
 
@@ -1236,6 +1244,8 @@ static void reset_cursor_mode(struct tinywl_server *server) {
     server->dragged_icon_node = NULL;
     server->icon_drag_candidate = false;
     server->icon_dragging = false;
+    
+    server->last_clicked_icon = NULL;
 }
 
 static void process_cursor_move(struct tinywl_server *server) {
@@ -1414,6 +1424,104 @@ static void server_cursor_motion_absolute(
     process_cursor_motion(server, event->time_msec);
 }
 
+// -----------------------------------------------------------------------------
+// Desktop icons (config-driven)
+// Config format (one per line):
+//   x y icon_png_path | command to run
+// Example:
+//   40 40 icons/64x64/apps/terminal.png | foot
+// Lines starting with # are comments.
+// -----------------------------------------------------------------------------
+
+static char *ade_trim(char *s) {
+    while (*s && isspace((unsigned char)*s)) s++;
+    char *end = s + strlen(s);
+    while (end > s && isspace((unsigned char)end[-1])) end--;
+    *end = '\0';
+    return s;
+}
+
+static struct ade_desktop_icon *ade_desktop_icon_from_scene_node(struct wlr_scene_node *node) {
+    struct wlr_scene_node *n = node;
+    while (n != NULL) {
+        if (n->data != NULL) {
+            return (struct ade_desktop_icon *)n->data;
+        }
+        n = n->parent ? &n->parent->node : NULL;
+    }
+    return NULL;
+}
+
+static void ade_free_desktop_icon(struct ade_desktop_icon *ic) {
+    if (!ic) return;
+    free(ic->exec_cmd);
+    free(ic);
+}
+
+static void ade_load_desktop_icons_from_conf(struct tinywl_server *server, const char *conf_path) {
+    if (server == NULL || server->desktop_icons == NULL || conf_path == NULL) {
+        return;
+    }
+
+    FILE *f = fopen(conf_path, "r");
+    if (!f) {
+        wlr_log(WLR_ERROR, "ADE: could not open desktop icons config: %s", conf_path);
+        return;
+    }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        char *p = ade_trim(line);
+        if (*p == '\0' || *p == '#') continue;
+
+        char *bar = strchr(p, '|');
+        if (!bar) continue;
+        *bar = '\0';
+
+        char *left = ade_trim(p);
+        char *right = ade_trim(bar + 1);
+        if (*right == '\0') continue;
+
+        int x = 0, y = 0;
+        char png[512];
+        png[0] = '\0';
+        if (sscanf(left, "%d %d %511s", &x, &y, png) != 3) continue;
+
+        struct ade_desktop_icon *ic = calloc(1, sizeof(*ic));
+        if (!ic) continue;
+
+        ic->exec_cmd = strdup(right);
+
+        // Try PNG first
+        struct wlr_buffer *icon_buf = ade_load_png_as_wlr_buffer(png);
+        if (icon_buf != NULL) {
+            struct wlr_scene_buffer *sb = wlr_scene_buffer_create(server->desktop_icons, icon_buf);
+            wlr_buffer_drop(icon_buf);
+
+            if (sb != NULL) {
+                wlr_scene_node_set_position(&sb->node, x, y);
+                ic->node = &sb->node;
+                ic->node->data = ic; // tag for hit-testing
+                continue;
+            }
+        }
+
+        // Fallback: placeholder rect
+        const float col[4] = { 0.80f, 0.80f, 0.80f, 1.0f };
+        struct wlr_scene_rect *r = wlr_scene_rect_create(server->desktop_icons, 48, 48, col);
+        if (r != NULL) {
+            wlr_scene_node_set_position(&r->node, x, y);
+            ic->node = &r->node;
+            ic->node->data = ic;
+            continue;
+        }
+
+        ade_free_desktop_icon(ic);
+    }
+
+    fclose(f);
+}
+
 static void server_cursor_button(struct wl_listener *listener, void *data) {
     /* This event is forwarded by the cursor when a pointer emits a button
      * event. */
@@ -1443,7 +1551,10 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
                 if (server->icon_click_count >= 2) {
                     server->icon_click_count = 0;
                     server->last_icon_click_msec = 0;
-                    ade_launch_terminal();
+                    //ade_launch_terminal();
+                    if (server->last_clicked_icon != NULL && server->last_clicked_icon->exec_cmd != NULL) {
+                        ade_spawn(server->last_clicked_icon->exec_cmd);
+                    }
                 }
             }
 
@@ -1463,6 +1574,8 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     struct wlr_scene_node *node = wlr_scene_node_at(
         &server->scene->tree.node, server->cursor->x, server->cursor->y, &sx, &sy);
 
+    
+    /*
     // Desktop icon handling (arm drag on press)
     if (event->button == BTN_LEFT &&
         event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
@@ -1502,6 +1615,34 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 
             // Don't forward icon presses to clients
             return;
+        }
+    }
+     */
+    
+    
+    // Desktop icon handling (arm drag on press)
+    // IMPORTANT: Only treat nodes as desktop icons if they are within the desktop icon scene tree.
+    // Otherwise we may misinterpret window scene nodes (which also use node.data) as icons.
+    if (event->button == BTN_LEFT &&
+        event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
+        node != NULL &&
+        server->desktop_icons != NULL &&
+        ade_node_is_or_ancestor(node, &server->desktop_icons->node)) {
+
+        struct ade_desktop_icon *hit_icon = ade_desktop_icon_from_scene_node(node);
+        if (hit_icon != NULL && hit_icon->node != NULL) {
+            server->icon_drag_candidate = true;
+            server->icon_dragging = false;
+            server->icon_press_x = server->cursor->x;
+            server->icon_press_y = server->cursor->y;
+
+            server->dragged_icon_node = hit_icon->node;
+            server->last_clicked_icon = hit_icon;
+
+            server->icon_grab_dx = server->cursor->x - server->dragged_icon_node->x;
+            server->icon_grab_dy = server->cursor->y - server->dragged_icon_node->y;
+
+            return; // don't forward to clients
         }
     }
     
@@ -2426,32 +2567,14 @@ int main(int argc, char *argv[]) {
     
     // Desktop icon layer
     server.desktop_icons = wlr_scene_tree_create(&server.scene->tree);
+    
+    // Desktop icons are loaded from a repo-local config so rsync can copy it with source.
+    ade_load_desktop_icons_from_conf(&server, "desktop-icons.conf");
 
-    // Desktop icon (try PNG first, fall back to a placeholder rect)
+    // Icons are config-driven; remove hard-coded icons so double-click behavior
+    // always uses the config's exec_cmd.
     server.terminal_icon_scene = NULL;
     server.terminal_icon_rect = NULL;
-
-    const char *terminal_png = "icons/64x64/apps/terminal.png";
-    struct wlr_buffer *icon_buf = ade_load_png_as_wlr_buffer(terminal_png);
-    if (icon_buf != NULL) {
-        server.terminal_icon_scene = wlr_scene_buffer_create(server.desktop_icons, icon_buf);
-        // scene_buffer_create takes ownership via refcounting; we can drop our ref
-        wlr_buffer_drop(icon_buf);
-
-        if (server.terminal_icon_scene != NULL) {
-            wlr_scene_node_set_position(&server.terminal_icon_scene->node, 40, 40);
-        } else {
-            wlr_log(WLR_ERROR, "ADE: wlr_scene_buffer_create failed for %s", terminal_png);
-        }
-    }
-
-    if (server.terminal_icon_scene == NULL) {
-        float icon_col[4] = { 0.90f, 0.90f, 0.90f, 1.0f }; // light gray placeholder
-        server.terminal_icon_rect = wlr_scene_rect_create(server.desktop_icons, 64, 64, icon_col);
-        wlr_scene_node_set_position(&server.terminal_icon_rect->node, 40, 40);
-    }
-
-    wlr_scene_node_raise_to_top(&server.desktop_icons->node);
 
     wlr_scene_node_lower_to_bottom(&server.bg_rect->node);
     
@@ -2599,5 +2722,10 @@ int main(int argc, char *argv[]) {
     
     ade_global_display = NULL;
     
+    
+    server.last_clicked_icon = NULL;
+    
     return 0;
 }
+
+
