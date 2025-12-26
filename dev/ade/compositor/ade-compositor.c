@@ -18,6 +18,7 @@
 
 #include <drm_fourcc.h>
 #include <wlr/types/wlr_buffer.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
 
 #include <linux/input-event-codes.h>
 
@@ -28,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <ctype.h>
 #include <time.h>
 #include <unistd.h>
@@ -58,6 +60,8 @@
 #include <wlr/render/wlr_texture.h>
 
 #include "desktop_icons.h"
+
+#define ADE_TAB_HEIGHT 25
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum tinywl_cursor_mode {
@@ -145,6 +149,11 @@ struct tinywl_server {
     char desktop_icons_conf_path[512];
     
     struct ade_desktop_icon *last_clicked_icon;
+    
+    struct wlr_xdg_decoration_manager_v1 *xdg_decoration_manager;
+    struct wl_listener new_xdg_decoration;
+    
+    struct wl_listener backend_destroy;
 };
 
 
@@ -196,6 +205,10 @@ struct tinywl_toplevel {
     struct wlr_scene_tree *expand_tree;
     struct wlr_scene_rect *expand_bg;
     struct wlr_scene_tree *expand_plus_tree;
+    
+    struct wlr_xdg_toplevel_decoration_v1 *xdg_decoration;
+    struct wl_listener xdg_decoration_request_mode;
+    struct wl_listener xdg_decoration_destroy;
 };
 
 struct tinywl_popup {
@@ -937,12 +950,21 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel) {
 static struct wl_display *ade_global_display = NULL;
 
 static void ade_handle_signal(int sig) {
-    (void)sig;
+    wlr_log(WLR_ERROR, "ADE: received signal %d", sig);
     if (ade_global_display != NULL) {
         wl_display_terminate(ade_global_display);
     }
 }
 
+
+static void ade_backend_destroy_notify(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct tinywl_server *server = wl_container_of(listener, server, backend_destroy);
+    wlr_log(WLR_ERROR, "ADE: backend destroyed -> terminating display");
+    if (server && server->wl_display) {
+        wl_display_terminate(server->wl_display);
+    }
+}
 
 static void keyboard_handle_modifiers(
         struct wl_listener *listener, void *data) {
@@ -1346,7 +1368,7 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
             if (desired_x > max_x) desired_x = max_x;
 
             toplevel->tab_x_px = desired_x;
-            wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, -22);
+            wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, -ADE_TAB_HEIGHT);
         }
         return;
     }
@@ -2056,6 +2078,28 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
     // Default to unfocused appearance until focus_toplevel decides otherwise
     ade_set_tab_selected(toplevel, false);
 
+    /*
+    // Enforce server-side decorations if the surface is mapped and ready.
+    if (toplevel->xdg_decoration && toplevel->xdg_toplevel && toplevel->xdg_toplevel->base && toplevel->xdg_toplevel->base->initialized) {
+        wlr_xdg_toplevel_decoration_v1_set_mode(
+            toplevel->xdg_decoration,
+            WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
+        );
+    }
+     */
+    // Enforce server-side decorations once the surface is initialized (safe here on map).
+    if (toplevel->xdg_decoration) {
+        if (toplevel->xdg_toplevel && toplevel->xdg_toplevel->base &&
+            toplevel->xdg_toplevel->base->initialized) {
+            wlr_xdg_toplevel_decoration_v1_set_mode(
+                toplevel->xdg_decoration,
+                WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
+            );
+        } else {
+            wlr_log(WLR_DEBUG, "ADE: toplevel mapped but decoration surface not initialized?");
+        }
+    }
+
     focus_toplevel(toplevel);
     
     ade_deskbar_update_layout(toplevel->server);
@@ -2139,6 +2183,12 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
     wl_list_remove(&toplevel->request_resize.link);
     wl_list_remove(&toplevel->request_maximize.link);
     wl_list_remove(&toplevel->request_fullscreen.link);
+    
+    if (toplevel->xdg_decoration) {
+        wl_list_remove(&toplevel->xdg_decoration_request_mode.link);
+        wl_list_remove(&toplevel->xdg_decoration_destroy.link);
+        toplevel->xdg_decoration = NULL;
+    }
 
     free(toplevel);
 }
@@ -2275,7 +2325,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     toplevel->tab_rect = wlr_scene_rect_create(
         toplevel->tab_tree,
         160,   // tab width
-        22,    // tab height
+        ADE_TAB_HEIGHT,    // tab height
         yellow
     );
 
@@ -2313,6 +2363,8 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     wl_signal_add(&xdg_toplevel->events.request_maximize, &toplevel->request_maximize);
     toplevel->request_fullscreen.notify = xdg_toplevel_request_fullscreen;
     wl_signal_add(&xdg_toplevel->events.request_fullscreen, &toplevel->request_fullscreen);
+    
+    toplevel->xdg_decoration = NULL;
 }
 
 static void xdg_popup_commit(struct wl_listener *listener, void *data) {
@@ -2443,6 +2495,94 @@ static void ade_update_background(struct tinywl_server *server) {
     wlr_scene_node_lower_to_bottom(&server->bg_rect->node);
 }
 
+static struct tinywl_toplevel *toplevel_from_xdg_toplevel(struct wlr_xdg_toplevel *xdg_toplevel) {
+    if (!xdg_toplevel || !xdg_toplevel->base) return NULL;
+    struct wlr_scene_tree *scene_tree = xdg_toplevel->base->data;
+    if (!scene_tree) return NULL;
+    return (struct tinywl_toplevel *)scene_tree->node.data;
+}
+
+static void xdg_decoration_request_mode(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct tinywl_toplevel *toplevel =
+        wl_container_of(listener, toplevel, xdg_decoration_request_mode);
+
+    if (!toplevel || !toplevel->xdg_decoration) {
+        return;
+    }
+
+    // wlroots aborts if this schedules a configure before the xdg_surface is initialized
+    if (!toplevel->xdg_toplevel || !toplevel->xdg_toplevel->base ||
+        !toplevel->xdg_toplevel->base->initialized) {
+        wlr_log(WLR_DEBUG, "ADE: decoration request_mode before surface initialized; deferring");
+        return;
+    }
+
+    wlr_xdg_toplevel_decoration_v1_set_mode(
+        toplevel->xdg_decoration,
+        WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
+    );
+}
+
+static void xdg_decoration_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct tinywl_toplevel *toplevel =
+        wl_container_of(listener, toplevel, xdg_decoration_destroy);
+
+    if (!toplevel) return;
+
+    wl_list_remove(&toplevel->xdg_decoration_request_mode.link);
+    wl_list_remove(&toplevel->xdg_decoration_destroy.link);
+    toplevel->xdg_decoration = NULL;
+}
+
+static void server_new_xdg_decoration(struct wl_listener *listener, void *data) {
+    struct tinywl_server *server =
+        wl_container_of(listener, server, new_xdg_decoration);
+    (void)server;
+
+    struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
+    if (!decoration || !decoration->toplevel) {
+        return;
+    }
+
+    struct tinywl_toplevel *toplevel = toplevel_from_xdg_toplevel(decoration->toplevel);
+
+    /*
+     * IMPORTANT:
+     * wlroots aborts if we try to schedule a configure before the xdg_surface
+     * is initialized. `wlr_xdg_toplevel_decoration_v1_set_mode()` internally
+     * schedules a configure, so only call it once the surface is initialized
+     * (typically true by the time it maps).
+     */
+    if (!toplevel) {
+        return;
+    }
+
+    // If an old decoration exists, detach listeners
+    if (toplevel->xdg_decoration) {
+        wl_list_remove(&toplevel->xdg_decoration_request_mode.link);
+        wl_list_remove(&toplevel->xdg_decoration_destroy.link);
+    }
+
+    toplevel->xdg_decoration = decoration;
+
+    toplevel->xdg_decoration_request_mode.notify = xdg_decoration_request_mode;
+    wl_signal_add(&decoration->events.request_mode, &toplevel->xdg_decoration_request_mode);
+
+    toplevel->xdg_decoration_destroy.notify = xdg_decoration_destroy;
+    wl_signal_add(&decoration->events.destroy, &toplevel->xdg_decoration_destroy);
+
+    /*
+    if (toplevel->xdg_toplevel && toplevel->xdg_toplevel->base && toplevel->xdg_toplevel->base->initialized) {
+        wlr_xdg_toplevel_decoration_v1_set_mode(
+            toplevel->xdg_decoration,
+            WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
+        );
+    }
+     */
+}
+
 int main(int argc, char *argv[]) {
 
     // Some VM/nested backends have broken hardware cursors (offset/inverted).
@@ -2489,6 +2629,10 @@ int main(int argc, char *argv[]) {
     /* The Wayland display is managed by libwayland. It handles accepting
      * clients from the Unix socket, manging Wayland globals, and so on. */
     server.wl_display = wl_display_create();
+    if (server.wl_display == NULL) {
+        fprintf(stderr, "ADE: wl_display_create failed\n");
+        return 1;
+    }
     
     // Allow Ctrl-C / kill / hangup to exit the compositor cleanly.
     ade_global_display = server.wl_display;
@@ -2503,8 +2647,14 @@ int main(int argc, char *argv[]) {
     server.backend = wlr_backend_autocreate(wl_display_get_event_loop(server.wl_display), NULL);
     if (server.backend == NULL) {
         wlr_log(WLR_ERROR, "failed to create wlr_backend");
+        wl_display_destroy(server.wl_display);
         return 1;
     }
+    
+    // Log if the backend shuts down under us (helps diagnose “starts then exits”)
+    server.backend_destroy.notify = ade_backend_destroy_notify;
+    wl_signal_add(&server.backend->events.destroy, &server.backend_destroy);
+    
 
     /* Autocreates a renderer, either Pixman, GLES2 or Vulkan for us. The user
      * can also specify a renderer using the WLR_RENDERER env var.
@@ -2513,6 +2663,8 @@ int main(int argc, char *argv[]) {
     server.renderer = wlr_renderer_autocreate(server.backend);
     if (server.renderer == NULL) {
         wlr_log(WLR_ERROR, "failed to create wlr_renderer");
+        wlr_backend_destroy(server.backend);
+        wl_display_destroy(server.wl_display);
         return 1;
     }
 
@@ -2526,6 +2678,9 @@ int main(int argc, char *argv[]) {
         server.renderer);
     if (server.allocator == NULL) {
         wlr_log(WLR_ERROR, "failed to create wlr_allocator");
+        wlr_renderer_destroy(server.renderer);
+        wlr_backend_destroy(server.backend);
+        wl_display_destroy(server.wl_display);
         return 1;
     }
 
@@ -2543,6 +2698,14 @@ int main(int argc, char *argv[]) {
     /* Creates an output layout, which a wlroots utility for working with an
      * arrangement of screens in a physical layout. */
     server.output_layout = wlr_output_layout_create(server.wl_display);
+    if (server.output_layout == NULL) {
+        wlr_log(WLR_ERROR, "ADE: failed to create output layout");
+        wlr_allocator_destroy(server.allocator);
+        wlr_renderer_destroy(server.renderer);
+        wlr_backend_destroy(server.backend);
+        wl_display_destroy(server.wl_display);
+        return 1;
+    }
 
     /* Configure a listener to be notified when new outputs are available on the
      * backend. */
@@ -2557,11 +2720,40 @@ int main(int argc, char *argv[]) {
      * necessary.
      */
     server.scene = wlr_scene_create();
+    if (server.scene == NULL) {
+        wlr_log(WLR_ERROR, "ADE: failed to create scene");
+        wlr_output_layout_destroy(server.output_layout);
+        wlr_allocator_destroy(server.allocator);
+        wlr_renderer_destroy(server.renderer);
+        wlr_backend_destroy(server.backend);
+        wl_display_destroy(server.wl_display);
+        return 1;
+    }
     server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
+    if (server.scene_layout == NULL) {
+        wlr_log(WLR_ERROR, "ADE: failed to attach scene to output layout");
+        wlr_scene_node_destroy(&server.scene->tree.node);
+        wlr_output_layout_destroy(server.output_layout);
+        wlr_allocator_destroy(server.allocator);
+        wlr_renderer_destroy(server.renderer);
+        wlr_backend_destroy(server.backend);
+        wl_display_destroy(server.wl_display);
+        return 1;
+    }
 
     // BeOS-like blue desktop background
     float beos_blue[4] = { 0.1608f, 0.3137f, 0.5255f, 1.0f };
     server.bg_rect = wlr_scene_rect_create(&server.scene->tree, 1920, 1080, beos_blue);
+    if (server.bg_rect == NULL) {
+        wlr_log(WLR_ERROR, "ADE: failed to create background rect");
+        wlr_scene_node_destroy(&server.scene->tree.node);
+        wlr_output_layout_destroy(server.output_layout);
+        wlr_allocator_destroy(server.allocator);
+        wlr_renderer_destroy(server.renderer);
+        wlr_backend_destroy(server.backend);
+        wl_display_destroy(server.wl_display);
+        return 1;
+    }
     wlr_scene_node_set_position(&server.bg_rect->node, 0, 0);
     wlr_scene_node_lower_to_bottom(&server.bg_rect->node);
     
@@ -2585,13 +2777,51 @@ int main(int argc, char *argv[]) {
      */
     wl_list_init(&server.toplevels);
     server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 3);
+    if (server.xdg_shell == NULL) {
+        wlr_log(WLR_ERROR, "ADE: failed to create xdg_shell");
+        wlr_scene_node_destroy(&server.scene->tree.node);
+        wlr_output_layout_destroy(server.output_layout);
+        wlr_allocator_destroy(server.allocator);
+        wlr_renderer_destroy(server.renderer);
+        wlr_backend_destroy(server.backend);
+        wl_display_destroy(server.wl_display);
+        return 1;
+    }
     server.new_xdg_toplevel.notify = server_new_xdg_toplevel;
     wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_xdg_toplevel);
     server.new_xdg_popup.notify = server_new_xdg_popup;
     wl_signal_add(&server.xdg_shell->events.new_popup, &server.new_xdg_popup);
+    
+    
+    // --- xdg-decoration (force server-side decorations / remove app titlebars) ---
+    // Initialize the listener link so cleanup is safe even if the protocol isn't available.
+    wl_list_init(&server.new_xdg_decoration.link);
+
+    server.xdg_decoration_manager =
+        wlr_xdg_decoration_manager_v1_create(server.wl_display);
+
+    if (server.xdg_decoration_manager != NULL) {
+        server.new_xdg_decoration.notify = server_new_xdg_decoration;
+        wl_signal_add(&server.xdg_decoration_manager->events.new_toplevel_decoration,
+                      &server.new_xdg_decoration);
+    } else {
+        wlr_log(WLR_ERROR,
+            "ADE: xdg-decoration manager not available; clients may show their own titlebars");
+    }
+    
 
     /* Set up layer-shell. This is used by launchers/panels/overlays like fuzzel. */
     server.layer_shell = wlr_layer_shell_v1_create(server.wl_display, 4);
+    if (server.layer_shell == NULL) {
+        wlr_log(WLR_ERROR, "ADE: failed to create layer_shell");
+        wlr_scene_node_destroy(&server.scene->tree.node);
+        wlr_output_layout_destroy(server.output_layout);
+        wlr_allocator_destroy(server.allocator);
+        wlr_renderer_destroy(server.renderer);
+        wlr_backend_destroy(server.backend);
+        wl_display_destroy(server.wl_display);
+        return 1;
+    }
     server.new_layer_surface.notify = server_new_layer_surface;
     wl_signal_add(&server.layer_shell->events.new_surface, &server.new_layer_surface);
 
@@ -2600,6 +2830,16 @@ int main(int argc, char *argv[]) {
      * image shown on screen.
      */
     server.cursor = wlr_cursor_create();
+    if (server.cursor == NULL) {
+        wlr_log(WLR_ERROR, "ADE: failed to create cursor");
+        wlr_scene_node_destroy(&server.scene->tree.node);
+        wlr_output_layout_destroy(server.output_layout);
+        wlr_allocator_destroy(server.allocator);
+        wlr_renderer_destroy(server.renderer);
+        wlr_backend_destroy(server.backend);
+        wl_display_destroy(server.wl_display);
+        return 1;
+    }
     wlr_cursor_attach_output_layout(server.cursor, server.output_layout);
 
     /* Creates an xcursor manager, another wlroots utility which loads up
@@ -2607,6 +2847,17 @@ int main(int argc, char *argv[]) {
      * images are available at all scale factors on the screen (necessary for
      * HiDPI support). */
     server.cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
+    if (server.cursor_mgr == NULL) {
+        wlr_log(WLR_ERROR, "ADE: failed to create xcursor manager");
+        wlr_cursor_destroy(server.cursor);
+        wlr_scene_node_destroy(&server.scene->tree.node);
+        wlr_output_layout_destroy(server.output_layout);
+        wlr_allocator_destroy(server.allocator);
+        wlr_renderer_destroy(server.renderer);
+        wlr_backend_destroy(server.backend);
+        wl_display_destroy(server.wl_display);
+        return 1;
+    }
     // Start with a sane compositor cursor at scale=1; outputs will reload at their scale.
     ade_reload_cursor_for_output(&server, NULL);
 
@@ -2643,6 +2894,18 @@ int main(int argc, char *argv[]) {
     server.new_input.notify = server_new_input;
     wl_signal_add(&server.backend->events.new_input, &server.new_input);
     server.seat = wlr_seat_create(server.wl_display, "seat0");
+    if (server.seat == NULL) {
+        wlr_log(WLR_ERROR, "ADE: failed to create seat");
+        wlr_xcursor_manager_destroy(server.cursor_mgr);
+        wlr_cursor_destroy(server.cursor);
+        wlr_scene_node_destroy(&server.scene->tree.node);
+        wlr_output_layout_destroy(server.output_layout);
+        wlr_allocator_destroy(server.allocator);
+        wlr_renderer_destroy(server.renderer);
+        wlr_backend_destroy(server.backend);
+        wl_display_destroy(server.wl_display);
+        return 1;
+    }
     server.request_cursor.notify = seat_request_cursor;
     wl_signal_add(&server.seat->events.request_set_cursor,
             &server.request_cursor);
@@ -2687,6 +2950,7 @@ int main(int argc, char *argv[]) {
     wlr_log(WLR_INFO, "Running Wayland compositor on WAYLAND_DISPLAY=%s",
             socket);
     wl_display_run(server.wl_display);
+    wlr_log(WLR_ERROR, "ADE: wl_display_run returned (compositor exiting)");
 
 
     /* Once wl_display_run returns, we destroy all clients then shut down the
@@ -2711,6 +2975,13 @@ int main(int argc, char *argv[]) {
 
     wl_list_remove(&server.new_output.link);
 
+    // Only remove the decoration listener if it was actually registered
+    if (server.xdg_decoration_manager != NULL &&
+        server.new_xdg_decoration.link.next != &server.new_xdg_decoration.link &&
+        server.new_xdg_decoration.link.prev != &server.new_xdg_decoration.link) {
+        wl_list_remove(&server.new_xdg_decoration.link);
+    }
+    
 
     wlr_scene_node_destroy(&server.scene->tree.node);
     wlr_xcursor_manager_destroy(server.cursor_mgr);
