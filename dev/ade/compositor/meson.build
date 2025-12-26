@@ -1,5 +1,3 @@
-
-
 project('ade-compositor', 'c',
   version: '0.1.0',
   default_options: ['c_std=c11']
@@ -11,6 +9,9 @@ wayland_client = dependency('wayland-client')
 wayland_protocols = dependency('wayland-protocols')
 libinput = dependency('libinput')
 xkbcommon = dependency('xkbcommon')
+cairo = dependency('cairo')
+pango = dependency('pango')
+pangocairo = dependency('pangocairo')
 
 wayland_scanner = find_program('wayland-scanner')
 
@@ -65,11 +66,11 @@ executable(
     wayland_server,
     wayland_client,
     libinput,
-    xkbcommon
+    xkbcommon,
+    cairo,
+    pango,
+    pangocairo
   ],
   c_args: ['-DWLR_USE_UNSTABLE'],
   install: false
 )
-
-
-

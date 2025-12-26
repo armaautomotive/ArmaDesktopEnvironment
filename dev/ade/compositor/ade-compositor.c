@@ -176,6 +176,10 @@ struct tinywl_toplevel {
     struct wl_listener request_resize;
     struct wl_listener request_maximize;
     struct wl_listener request_fullscreen;
+    
+    struct wlr_scene_tree *expand_tree;
+    struct wlr_scene_rect *expand_bg;
+    struct wlr_scene_tree *expand_plus_tree;
 };
 
 struct tinywl_popup {
@@ -377,6 +381,91 @@ static void ade_show_help(void) {
     ade_spawn_shell(cmd);
 }
 
+
+// -----------------------------------------------------------------------------
+// Title sanitization
+// wlroots titles are UTF-8. Our tiny 5x7 font only supports basic ASCII.
+// Convert unknown/non-ASCII bytes to '?' so we never render random glyphs.
+// -----------------------------------------------------------------------------
+#include <string.h>
+static void ade_sanitize_title_ascii(const char *in, char *out, size_t out_sz) {
+    if (out == NULL || out_sz == 0) {
+        return;
+    }
+    out[0] = '\0';
+
+    if (in == NULL || in[0] == '\0') {
+        snprintf(out, out_sz, "%s", "APP");
+        return;
+    }
+
+    size_t oi = 0;
+    for (size_t i = 0; in[i] != '\0' && oi + 1 < out_sz; i++) {
+        unsigned char c = (unsigned char)in[i];
+
+        // Replace control chars; SKIP non-ASCII UTF-8 bytes entirely.
+        if (c < 0x20 || c == 0x7F) {
+            // Convert tabs/newlines to space
+            if (c == '\t' || c == '\n' || c == '\r') {
+                c = ' ';
+            } else {
+                c = ' ';
+            }
+        } else if (c >= 0x80) {
+            // Most app titles are UTF-8. Our tiny font is ASCII-only.
+            // Skip UTF-8 bytes so we keep any ASCII parts instead of rendering garbage.
+            continue;
+        }
+
+        // Normalize to uppercase for our glyph table
+        if (c >= 'a' && c <= 'z') {
+            c = (unsigned char)(c - 'a' + 'A');
+        }
+
+        out[oi++] = (char)c;
+    }
+    out[oi] = '\0';
+
+    // Trim trailing spaces
+    while (oi > 0 && out[oi - 1] == ' ') {
+        out[--oi] = '\0';
+    }
+
+    // Trim leading spaces
+    size_t start = 0;
+    while (out[start] == ' ') start++;
+    if (start > 0) {
+        memmove(out, out + start, strlen(out + start) + 1);
+    }
+
+    // Collapse consecutive spaces
+    size_t ri = 0;
+    size_t wi = 0;
+    bool prev_space = false;
+    while (out[ri] != '\0') {
+        char ch = out[ri++];
+        if (ch == ' ') {
+            if (prev_space) continue;
+            prev_space = true;
+        } else {
+            prev_space = false;
+        }
+        out[wi++] = ch;
+        if (wi + 1 >= out_sz) break;
+    }
+    out[wi] = '\0';
+
+    // Trim trailing space again after collapsing
+    while (wi > 0 && out[wi - 1] == ' ') {
+        out[--wi] = '\0';
+    }
+
+    // If we ended up empty, fall back
+    if (out[0] == '\0') {
+        snprintf(out, out_sz, "%s", "APP");
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Very small built-in bitmap font renderer for the yellow BeOS-style tab.
 // We draw text as tiny rectangles ("pixels") so we don't need extra deps.
@@ -384,7 +473,7 @@ static void ade_show_help(void) {
 // -----------------------------------------------------------------------------
 
 static uint8_t ade_font5x7_get(char c, int col) {
-    // Each glyph is 5 columns wide. Return a 7-bit column mask (LSB = top).
+    // Each glyph is 5 columns wide. Return a 7-bit column mask (MSB of the 7 bits = top).
     // Missing glyphs fall back to '?'.
     // NOTE: These are intentionally simple/rough.
     if (col < 0 || col >= 5) {
@@ -405,6 +494,17 @@ static uint8_t ade_font5x7_get(char c, int col) {
     }
     case '.': {
         static const uint8_t g[5] = {0,0,0,0b1000000,0b1000000};
+        return g[col];
+    }
+    case '?': {
+        // A simple 5x7 question mark
+        static const uint8_t g[5] = {
+            0b0100000,
+            0b1010000,
+            0b0001000,
+            0b0000000,
+            0b0001000
+        };
         return g[col];
     }
     case '0': { static const uint8_t g[5] = {0b0111110,0b1000001,0b1000001,0b1000001,0b0111110}; return g[col]; }
@@ -443,11 +543,95 @@ static uint8_t ade_font5x7_get(char c, int col) {
     case 'X': { static const uint8_t g[5] = {0b1100011,0b0010100,0b0001000,0b0010100,0b1100011}; return g[col]; }
     case 'Y': { static const uint8_t g[5] = {0b1100000,0b0010000,0b0001111,0b0010000,0b1100000}; return g[col]; }
     case 'Z': { static const uint8_t g[5] = {0b1000011,0b1000101,0b1001001,0b1010001,0b1100001}; return g[col]; }
-    default: {
-        static const uint8_t g[5] = {0b0000010,0b1010101,0b0001000,0b1010101,0b0100000};
-        return g[col];
+    default:
+        return ade_font5x7_get('?', col);
     }
+}
+
+// -----------------------------------------------------------------------------
+// "Soft" (pseudo anti-aliased) text rendering
+//
+// We don't have a real font rasterizer dependency yet. Instead, we render our
+// 5x7 bitmap font but add a subtle edge "halo" using alpha rectangles.
+// This makes the text look much less jagged, similar to classic BeOS UI.
+// -----------------------------------------------------------------------------
+
+static float ade_glyph_coverage_5x7(char c, int x, int y) {
+    // Returns 1.0 for a solid pixel, otherwise a small alpha if we're near an edge.
+    // Coordinates are in glyph pixels: x=[0..4], y=[0..6].
+    if (x < 0 || x >= 5 || y < 0 || y >= 7) {
+        return 0.0f;
     }
+
+    // Build "on" mask for this glyph
+    bool on[7][5] = {{false}};
+    for (int col = 0; col < 5; col++) {
+        uint8_t mask = ade_font5x7_get(c, col);
+        for (int row = 0; row < 7; row++) {
+            // Our glyph columns are encoded with the TOP pixel in the MSB of the 7-bit column.
+            // Convert to row-major with row=0 at the top.
+            int bit = 6 - row;
+            on[row][col] = ((mask >> bit) & 0x1) != 0;
+        }
+    }
+
+    if (on[y][x]) {
+        return 1.0f;
+    }
+
+    // 4-neighbor edge softening
+    const int dx4[4] = { -1, 1, 0, 0 };
+    const int dy4[4] = { 0, 0, -1, 1 };
+    for (int i = 0; i < 4; i++) {
+        int nx = x + dx4[i];
+        int ny = y + dy4[i];
+        if (nx >= 0 && nx < 5 && ny >= 0 && ny < 7 && on[ny][nx]) {
+            return 0.35f;
+        }
+    }
+
+    // diagonal edge softening
+    const int dxd[4] = { -1, -1, 1, 1 };
+    const int dyd[4] = { -1, 1, -1, 1 };
+    for (int i = 0; i < 4; i++) {
+        int nx = x + dxd[i];
+        int ny = y + dyd[i];
+        if (nx >= 0 && nx < 5 && ny >= 0 && ny < 7 && on[ny][nx]) {
+            return 0.20f;
+        }
+    }
+
+    return 0.0f;
+}
+
+static void ade_tab_draw_glyph_soft(struct wlr_scene_tree *parent,
+        char c, int origin_x, int origin_y, int px, const float base_rgb[3]) {
+    // Draw a 5x7 glyph using rectangles, but with a soft halo for anti-alias-like edges.
+    // base_rgb is RGB (0..1). Alpha is controlled per "pixel".
+    for (int gy = 0; gy < 7; gy++) {
+        for (int gx = 0; gx < 5; gx++) {
+            float cov = ade_glyph_coverage_5x7(c, gx, gy);
+            if (cov <= 0.0f) {
+                continue;
+            }
+            float ink[4] = { base_rgb[0], base_rgb[1], base_rgb[2], cov };
+            struct wlr_scene_rect *dot = wlr_scene_rect_create(parent, px, px, ink);
+            wlr_scene_node_set_position(&dot->node,
+                origin_x + gx * px,
+                origin_y + gy * px);
+        }
+    }
+}
+
+static int ade_title_measure_px(const char *safe_title, int px) {
+    const int glyph_w = 5;
+    const int glyph_spacing = 1;
+    int title_len = 0;
+    while (safe_title[title_len] != '\0' && title_len < 32) {
+        title_len++;
+    }
+    int char_advance = (glyph_w + glyph_spacing) * px;
+    return title_len * char_advance;
 }
 
 static void ade_tab_clear_text(struct tinywl_toplevel *toplevel) {
@@ -471,6 +655,22 @@ static void ade_tab_clear_close(struct tinywl_toplevel *toplevel) {
         toplevel->close_tree = NULL;
     }
 }
+
+static void ade_tab_clear_expand(struct tinywl_toplevel *toplevel) {
+    if (toplevel->expand_plus_tree != NULL) {
+        wlr_scene_node_destroy(&toplevel->expand_plus_tree->node);
+        toplevel->expand_plus_tree = NULL;
+    }
+    if (toplevel->expand_bg != NULL) {
+        wlr_scene_node_destroy(&toplevel->expand_bg->node);
+        toplevel->expand_bg = NULL;
+    }
+    if (toplevel->expand_tree != NULL) {
+        wlr_scene_node_destroy(&toplevel->expand_tree->node);
+        toplevel->expand_tree = NULL;
+    }
+}
+
 
 static void ade_tab_build_close(struct tinywl_toplevel *toplevel, int tab_width) {
     if (toplevel == NULL || toplevel->tab_tree == NULL) {
@@ -510,6 +710,42 @@ static void ade_tab_build_close(struct tinywl_toplevel *toplevel, int tab_width)
     wlr_scene_node_raise_to_top(&toplevel->close_tree->node);
 }
 
+static void ade_tab_build_expand(struct tinywl_toplevel *toplevel, int tab_width) {
+    if (toplevel == NULL || toplevel->tab_tree == NULL) return;
+
+    ade_tab_clear_expand(toplevel);
+
+    const int margin_right = 10;
+    const int btn_size = 16;
+    const int btn_y = 3;
+    int btn_x = tab_width - margin_right - btn_size;
+    if (btn_x < 0) btn_x = 0;
+
+    toplevel->expand_tree = wlr_scene_tree_create(toplevel->tab_tree);
+
+    float bg[4] = { 0.92f, 0.72f, 0.12f, 1.0f };
+    toplevel->expand_bg = wlr_scene_rect_create(toplevel->expand_tree, btn_size, btn_size, bg);
+    wlr_scene_node_set_position(&toplevel->expand_bg->node, btn_x, btn_y);
+
+    toplevel->expand_plus_tree = wlr_scene_tree_create(toplevel->expand_tree);
+    float ink[4] = { 0.25f, 0.18f, 0.05f, 1.0f };
+    const int px = 2;
+
+    const int cx = btn_x + 8;
+    const int cy = btn_y + 8;
+
+    for (int i = -2; i <= 2; i++) {
+        struct wlr_scene_rect *d = wlr_scene_rect_create(toplevel->expand_plus_tree, px, px, ink);
+        wlr_scene_node_set_position(&d->node, cx + i * px, cy);
+    }
+    for (int i = -2; i <= 2; i++) {
+        struct wlr_scene_rect *d = wlr_scene_rect_create(toplevel->expand_plus_tree, px, px, ink);
+        wlr_scene_node_set_position(&d->node, cx, cy + i * px);
+    }
+
+    wlr_scene_node_raise_to_top(&toplevel->expand_tree->node);
+}
+
 static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *title) {
     if (toplevel == NULL || toplevel->tab_tree == NULL) {
         return;
@@ -518,18 +754,15 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
     // Remove previous text nodes
     ade_tab_clear_text(toplevel);
 
-    if (title == NULL || title[0] == '\0') {
-        title = "APP";
-    }
+    char safe_title[128];
+    ade_sanitize_title_ascii(title, safe_title, sizeof(safe_title));
 
     // Create a subtree for the text so we can destroy/recreate easily.
     toplevel->tab_text_tree = wlr_scene_tree_create(toplevel->tab_tree);
 
     // Render settings
-    const int px = 2;            // "pixel" size
-    const int glyph_w = 5;
-    const int glyph_h = 7;
-    const int glyph_spacing = 1; // in font pixels
+    // Use a smaller pixel size; the soft halo makes this read well and feel more "font-like".
+    const int px = 2;
 
     // Position inside the tab
     // Leave space for the close button on the left, plus a small gap.
@@ -541,70 +774,36 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
     int origin_x = left_pad;
     int origin_y = 4; // inside tab (tab starts at -22)
 
-    // Text color: a darker brown-ish for contrast
-    float ink[4] = { 0.25f, 0.18f, 0.05f, 1.0f };
-
-    // Compute how many characters we will draw (hard clamp so tabs don't get huge)
-    const int max_chars = 32;
-    int title_len = 0;
-    while (title[title_len] != '\0' && title_len < max_chars) {
-        title_len++;
-    }
+    // Text color: a darker brown-ish for contrast (RGB only here)
+    const float ink_rgb[3] = { 0.25f, 0.18f, 0.05f };
 
     // Resize the yellow tab to fit the text (with clamps)
-    // Each character advances (glyph_w + glyph_spacing) "font pixels", scaled by px.
-    int char_advance = (glyph_w + glyph_spacing) * px;
-    int desired_w = left_pad + right_pad + title_len * char_advance;
+    int text_w = ade_title_measure_px(safe_title, px);
+    int desired_w = left_pad + right_pad + text_w;
     const int min_w = 120;
     const int max_w = 420;
     if (desired_w < min_w) desired_w = min_w;
     if (desired_w > max_w) desired_w = max_w;
-    
+
     toplevel->tab_width_px = desired_w;
 
     // Apply tab width
     if (toplevel->tab_rect != NULL) {
-        // wlroots versions differ slightly; try the rect helper when available.
-        // If your build doesn't have wlr_scene_rect_set_size, switch to node-based sizing.
-        #ifdef WLR_HAVE_SCENE_RECT_SET_SIZE
         wlr_scene_rect_set_size(toplevel->tab_rect, desired_w, 22);
-        #else
-        // Fallback: destroy & recreate the rect is overkill; keep constant 22px height.
-        // If this triggers a compile error, remove this block and rely on the helper.
-        wlr_scene_rect_set_size(toplevel->tab_rect, desired_w, 22);
-        #endif
     }
-    
+
     // Build/rebuild close button for this tab width
     ade_tab_build_close(toplevel, desired_w);
 
-    for (int i = 0; title[i] != '\0' && i < title_len; i++) {
-        char c = title[i];
-        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-
-        int char_x = origin_x + i * ( (glyph_w + glyph_spacing) * px );
-
-        for (int col = 0; col < glyph_w; col++) {
-            uint8_t mask = ade_font5x7_get(c, col);
-            for (int row = 0; row < glyph_h; row++) {
-                bool on = (mask >> row) & 0x1;
-                if (!on) continue;
-
-                struct wlr_scene_rect *dot = wlr_scene_rect_create(
-                    toplevel->tab_text_tree,
-                    px, px,
-                    ink
-                );
-                wlr_scene_node_set_position(
-                    &dot->node,
-                    char_x + col * px,
-                    origin_y + row * px
-                );
-            }
-        }
+    // Draw title using soft glyphs (pseudo-AA)
+    const int max_chars = 24;
+    for (int i = 0; safe_title[i] != '\0' && i < max_chars; i++) {
+        char c = safe_title[i];
+        int char_x = origin_x + i * ((5 + 1) * px);
+        ade_tab_draw_glyph_soft(toplevel->tab_text_tree, c, char_x, origin_y, px, ink_rgb);
     }
 
-    // Keep text above the tab rectangle
+    // Keep text and close button above the tab rectangle
     wlr_scene_node_raise_to_top(&toplevel->tab_text_tree->node);
     if (toplevel->close_tree != NULL) {
         wlr_scene_node_raise_to_top(&toplevel->close_tree->node);
@@ -1239,9 +1438,14 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
             return; // Do not send this click to clients
         }
 
-        // If the node under the cursor is the BeOS tab, start moving the window.
-        if (clicked_toplevel->tab_rect != NULL &&
-            node == &clicked_toplevel->tab_rect->node) {
+        // Treat ANY click on the tab (background, text, or decorations) as a tab click
+        bool hit_tab = false;
+        if (clicked_toplevel->tab_tree != NULL) {
+            hit_tab = ade_node_is_or_ancestor(
+                node, &clicked_toplevel->tab_tree->node);
+        }
+
+        if (hit_tab) {
             focus_toplevel(clicked_toplevel);
 
             bool shift_down = false;
@@ -1679,7 +1883,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     /* Tab container (movable along the top edge) */
     toplevel->tab_tree = wlr_scene_tree_create(toplevel->decor_tree);
     toplevel->tab_x_px = 0;       // start left
-    toplevel->tab_width_px = 160; // default until title render computes
+    toplevel->tab_width_px = 180; // default until title render computes
     wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, -22);
 
     /* BeOS-style yellow tab (rect is inside tab_tree so it moves with it) */
@@ -1694,6 +1898,8 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 
     /* tab_rect at (0,0) inside tab_tree */
     wlr_scene_node_set_position(&toplevel->tab_rect->node, 0, 0);
+    
+    
 
     toplevel->tab_text_tree = NULL;
     toplevel->close_tree = NULL;
@@ -1970,7 +2176,7 @@ int main(int argc, char *argv[]) {
     server.terminal_icon_scene = NULL;
     server.terminal_icon_rect = NULL;
 
-    const char *terminal_png = "icons/128x128/apps/terminal.png";
+    const char *terminal_png = "icons/64x64/apps/terminal.png";
     struct wlr_buffer *icon_buf = ade_load_png_as_wlr_buffer(terminal_png);
     if (icon_buf != NULL) {
         server.terminal_icon_scene = wlr_scene_buffer_create(server.desktop_icons, icon_buf);
