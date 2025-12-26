@@ -129,6 +129,14 @@ struct tinywl_server {
     bool icon_dragging;
     double icon_press_x;
     double icon_press_y;
+    
+    // Deskbar (Haiku-style top-right bar)
+    struct wlr_scene_tree *deskbar_tree;
+    struct wlr_scene_tree *deskbar_apps_tree;
+    struct wlr_scene_rect *deskbar_bg;
+    int deskbar_app_count;
+    int deskbar_width;
+    int deskbar_height;
 };
 
 
@@ -1592,6 +1600,10 @@ static void output_frame(struct wl_listener *listener, void *data) {
 }
 
 
+// Forward declarations (defined later in the file)
+static void ade_deskbar_init(struct tinywl_server *server);
+static void ade_deskbar_update_layout(struct tinywl_server *server);
+
 static void output_request_state(struct wl_listener *listener, void *data) {
     // Apply the backend-requested output state as-is. For nested/VM backends
     // (Wayland/X11), forcing a transform here can result in an inverted output
@@ -1612,6 +1624,8 @@ static void output_request_state(struct wl_listener *listener, void *data) {
     // Output size/scale can change under Wayland/X11 backends; keep background and cursor in sync.
     ade_update_background(output->server);
     ade_reload_cursor_for_output(output->server, output->wlr_output);
+    
+    ade_deskbar_update_layout(output->server);
 }
 
 static bool ade_get_primary_output_size(struct tinywl_server *server, int *out_w, int *out_h) {
@@ -1630,6 +1644,136 @@ static bool ade_get_primary_output_size(struct tinywl_server *server, int *out_w
     }
     return false;
 }
+
+
+// -----------------------------------------------------------------------------
+// Deskbar (Haiku-style top-right bar)
+// Minimal first pass: background slab + per-app slots; grows with mapped windows.
+// -----------------------------------------------------------------------------
+
+static int ade_count_mapped_toplevels(struct tinywl_server *server) {
+    if (server == NULL) return 0;
+    int count = 0;
+    struct tinywl_toplevel *it;
+    wl_list_for_each(it, &server->toplevels, link) {
+        // If it's in our list, it's mapped in our current design
+        if (it != NULL && it->xdg_toplevel != NULL) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static void ade_deskbar_rebuild_apps(struct tinywl_server *server) {
+    if (server == NULL || server->deskbar_tree == NULL) return;
+
+    // Recreate the apps subtree each time for simplicity
+    if (server->deskbar_apps_tree != NULL) {
+        wlr_scene_node_destroy(&server->deskbar_apps_tree->node);
+        server->deskbar_apps_tree = NULL;
+    }
+    server->deskbar_apps_tree = wlr_scene_tree_create(server->deskbar_tree);
+
+    const int pad = 3;
+    const int slot_w = 18;
+    const int slot_gap = 3;
+    const int slot_h = server->deskbar_height - pad * 2;
+
+    const float slot_bg[4]     = { 0.78f, 0.78f, 0.78f, 1.0f };
+    const float slot_border[4] = { 0.62f, 0.62f, 0.62f, 1.0f };
+
+    int x = pad;
+
+    for (int i = 0; i < server->deskbar_app_count; i++) {
+        struct wlr_scene_rect *r =
+            wlr_scene_rect_create(server->deskbar_apps_tree, slot_w, slot_h, slot_bg);
+        wlr_scene_node_set_position(&r->node, x, pad);
+
+        // Subtle border: top/bottom/left/right
+        struct wlr_scene_rect *bt = wlr_scene_rect_create(server->deskbar_apps_tree, slot_w, 1, slot_border);
+        wlr_scene_node_set_position(&bt->node, x, pad);
+
+        struct wlr_scene_rect *bb = wlr_scene_rect_create(server->deskbar_apps_tree, slot_w, 1, slot_border);
+        wlr_scene_node_set_position(&bb->node, x, pad + slot_h - 1);
+
+        struct wlr_scene_rect *bl = wlr_scene_rect_create(server->deskbar_apps_tree, 1, slot_h, slot_border);
+        wlr_scene_node_set_position(&bl->node, x, pad);
+
+        struct wlr_scene_rect *br = wlr_scene_rect_create(server->deskbar_apps_tree, 1, slot_h, slot_border);
+        wlr_scene_node_set_position(&br->node, x + slot_w - 1, pad);
+
+        x += slot_w + slot_gap;
+    }
+
+    wlr_scene_node_raise_to_top(&server->deskbar_apps_tree->node);
+}
+
+static void ade_deskbar_update_layout(struct tinywl_server *server) {
+    if (server == NULL || server->deskbar_tree == NULL || server->deskbar_bg == NULL) return;
+
+    int ow = 0, oh = 0;
+    if (!ade_get_primary_output_size(server, &ow, &oh) || ow <= 0 || oh <= 0) {
+        ow = 1920;
+        oh = 1080;
+    }
+
+    server->deskbar_app_count = ade_count_mapped_toplevels(server);
+
+    const int margin = 8;
+    const int base_w = 90;   // reserved for future tray/clock
+    const int slot_w = 18;
+    const int slot_gap = 3;
+
+    server->deskbar_height = 24;
+
+    int apps_w = 0;
+    if (server->deskbar_app_count > 0) {
+        apps_w = (server->deskbar_app_count * slot_w) + ((server->deskbar_app_count - 1) * slot_gap);
+    }
+
+    server->deskbar_width = base_w + 6 + apps_w;
+
+    // Clamp so it can't go off-screen
+    if (server->deskbar_width > ow - margin * 2) {
+        server->deskbar_width = ow - margin * 2;
+    }
+
+    int x = ow - margin - server->deskbar_width;
+    int y = margin;
+    if (x < margin) x = margin;
+
+    wlr_scene_node_set_position(&server->deskbar_tree->node, x, y);
+
+    const float bg_col[4] = { 0.86f, 0.86f, 0.86f, 0.92f };
+    wlr_scene_rect_set_size(server->deskbar_bg, server->deskbar_width, server->deskbar_height);
+    wlr_scene_rect_set_color(server->deskbar_bg, bg_col);
+
+    ade_deskbar_rebuild_apps(server);
+
+    // Keep it on top
+    wlr_scene_node_raise_to_top(&server->deskbar_tree->node);
+}
+
+static void ade_deskbar_init(struct tinywl_server *server) {
+    if (server == NULL || server->scene == NULL) return;
+    if (server->deskbar_tree != NULL) return; // already created
+
+    server->deskbar_height = 24;
+    server->deskbar_width = 140;
+    server->deskbar_app_count = 0;
+
+    server->deskbar_tree = wlr_scene_tree_create(&server->scene->tree);
+
+    const float bg_col[4] = { 0.86f, 0.86f, 0.86f, 0.92f };
+    server->deskbar_bg = wlr_scene_rect_create(server->deskbar_tree,
+        server->deskbar_width, server->deskbar_height, bg_col);
+    wlr_scene_node_set_position(&server->deskbar_bg->node, 0, 0);
+
+    server->deskbar_apps_tree = NULL;
+
+    ade_deskbar_update_layout(server);
+}
+
 
 static void output_destroy(struct wl_listener *listener, void *data) {
     struct tinywl_output *output = wl_container_of(listener, output, destroy);
@@ -1712,6 +1856,9 @@ static void server_new_output(struct wl_listener *listener, void *data) {
     ade_update_background(server);
     // Load cursor theme for this output's scale.
     ade_reload_cursor_for_output(server, wlr_output);
+    
+    ade_deskbar_init(server);
+    ade_deskbar_update_layout(server);
 
     int ow = 0, oh = 0;
     wlr_output_effective_resolution(wlr_output, &ow, &oh);
@@ -1769,6 +1916,8 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
     ade_set_tab_selected(toplevel, false);
 
     focus_toplevel(toplevel);
+    
+    ade_deskbar_update_layout(toplevel->server);
 }
 
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
@@ -1781,6 +1930,8 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
     }
 
     wl_list_remove(&toplevel->link);
+    
+    ade_deskbar_update_layout(toplevel->server);
 }
 
 static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
