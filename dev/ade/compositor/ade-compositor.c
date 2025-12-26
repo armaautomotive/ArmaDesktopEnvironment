@@ -115,6 +115,10 @@ struct tinywl_server {
     struct wlr_scene_tree *desktop_icons;
     struct wlr_scene_buffer *terminal_icon_scene;
     struct wlr_scene_rect *terminal_icon_rect;
+    
+    // Desktop icon double-click tracking
+    uint32_t last_icon_click_msec;
+    int icon_click_count;
 };
 
 
@@ -215,6 +219,27 @@ static void ade_spawn_shell(const char *sh_cmd) {
 static void ade_update_background(struct tinywl_server *server);
 
 
+static bool ade_node_is_or_ancestor(struct wlr_scene_node *node, struct wlr_scene_node *target) {
+    if (!node || !target) return false;
+    struct wlr_scene_node *cur = node;
+    while (cur) {
+        if (cur == target) return true;
+        if (!cur->parent) break;
+        cur = &cur->parent->node;
+    }
+    return false;
+}
+
+static void ade_launch_terminal(void) {
+    // Prefer foot; fall back to xterm; last resort a shell
+    const char *cmd =
+        "(command -v foot >/dev/null 2>&1 && exec foot) "
+        "|| (command -v xterm >/dev/null 2>&1 && exec xterm) "
+        "|| exec /bin/sh";
+    ade_spawn_shell(cmd);
+}
+
+
 // -----------------------------------------------------------------------------
 // PNG -> wlr_buffer helper (wlroots 0.20)
 // -----------------------------------------------------------------------------
@@ -262,7 +287,7 @@ static struct wlr_buffer *ade_load_png_as_wlr_buffer(const char *path) {
     // Force 4 channels (RGBA)
     unsigned char *rgba = stbi_load(path, &w, &h, &n, 4);
     if (!rgba || w <= 0 || h <= 0) {
-        wlr_log(WLR_ERROR, "ADE: failed to load PNG %s", path);
+        wlr_log(WLR_ERROR, "ADE: failed to load PNG %s (%s)", path, stbi_failure_reason());
         if (rgba) stbi_image_free(rgba);
         return NULL;
     }
@@ -284,7 +309,47 @@ static struct wlr_buffer *ade_load_png_as_wlr_buffer(const char *path) {
         stbi_image_free(rgba);
         return NULL;
     }
-    memcpy(buf->data, rgba, buf->stride * (size_t)h);
+
+    // --- Transparency handling ---
+    // Many icon PNGs already contain an alpha channel. If yours has a solid
+    // background baked in, we can treat the top-left pixel as a "color key"
+    // and make matching pixels fully transparent.
+    const uint8_t key_r = rgba[0];
+    const uint8_t key_g = rgba[1];
+    const uint8_t key_b = rgba[2];
+    const uint8_t key_a = rgba[3];
+
+    // Copy into our buffer, optionally apply color-key transparency, and
+    // premultiply alpha so blending looks correct.
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            size_t i = (size_t)(y * w + x) * 4;
+            uint8_t r = rgba[i + 0];
+            uint8_t g = rgba[i + 1];
+            uint8_t b = rgba[i + 2];
+            uint8_t a = rgba[i + 3];
+
+            // If the PNG has an opaque background color, key it out.
+            // We only key when the sampled key pixel is opaque, to avoid
+            // breaking images which already use alpha.
+            if (key_a == 255 && a == 255 && r == key_r && g == key_g && b == key_b) {
+                a = 0;
+            }
+
+            // Premultiply alpha for proper blending.
+            if (a < 255) {
+                r = (uint8_t)((uint16_t)r * (uint16_t)a / 255);
+                g = (uint8_t)((uint16_t)g * (uint16_t)a / 255);
+                b = (uint8_t)((uint16_t)b * (uint16_t)a / 255);
+            }
+
+            buf->data[i + 0] = r;
+            buf->data[i + 1] = g;
+            buf->data[i + 2] = b;
+            buf->data[i + 3] = a;
+        }
+    }
+
     stbi_image_free(rgba);
 
     wlr_buffer_init(&buf->base, &ade_pixel_buffer_impl, (size_t)w, (size_t)h);
@@ -1055,6 +1120,44 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     struct wlr_scene_node *node = wlr_scene_node_at(
         &server->scene->tree.node, server->cursor->x, server->cursor->y, &sx, &sy);
 
+    // Desktop icon handling (double-click to launch terminal)
+    if (event->button == BTN_LEFT &&
+        event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
+        node != NULL) {
+
+        bool hit_terminal_icon = false;
+
+        if (server->terminal_icon_scene != NULL) {
+            hit_terminal_icon = ade_node_is_or_ancestor(node, &server->terminal_icon_scene->node);
+        }
+        if (!hit_terminal_icon && server->terminal_icon_rect != NULL) {
+            hit_terminal_icon = ade_node_is_or_ancestor(node, &server->terminal_icon_rect->node);
+        }
+
+        if (hit_terminal_icon) {
+            const uint32_t dbl_ms = 400;
+
+            if (server->last_icon_click_msec != 0 &&
+                (event->time_msec - server->last_icon_click_msec) <= dbl_ms) {
+                server->icon_click_count++;
+            } else {
+                server->icon_click_count = 1;
+            }
+
+            server->last_icon_click_msec = event->time_msec;
+
+            if (server->icon_click_count >= 2) {
+                server->icon_click_count = 0;
+                server->last_icon_click_msec = 0;
+                ade_launch_terminal();
+            }
+
+            // Don't forward icon clicks to clients
+            return;
+        }
+    }
+    
+    
     struct tinywl_toplevel *clicked_toplevel = NULL;
     if (node != NULL) {
         clicked_toplevel = toplevel_from_scene_node(node);
@@ -1707,6 +1810,11 @@ int main(int argc, char *argv[]) {
     struct tinywl_server server = {0};
     server.cascade_index = 0;
     server.cascade_step = 24; // pixels per new window
+    
+    server.last_icon_click_msec = 0;
+    server.icon_click_count = 0;
+    
+    
     /* The Wayland display is managed by libwayland. It handles accepting
      * clients from the Unix socket, manging Wayland globals, and so on. */
     server.wl_display = wl_display_create();
