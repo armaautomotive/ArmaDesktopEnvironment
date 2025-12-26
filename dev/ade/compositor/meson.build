@@ -52,10 +52,29 @@ layer_shell_code = custom_target(
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@']
 )
 
+# Source list (split-out modules are optional during refactors)
+sources = [
+  'ade-compositor.c',
+]
+
+fs = import('fs')
+
+# Add optional modules if present
+if fs.exists('decorations.c')
+  sources += ['decorations.c']
+endif
+
+if fs.exists('desktop_icons.c')
+  sources += ['desktop_icons.c']
+endif
+
+if fs.exists('deskbar.c')
+  sources += ['deskbar.c']
+endif
+
 executable(
   'ade-compositor',
-  [
-    'ade-compositor.c',
+  sources + [
     xdg_shell_header,
     xdg_shell_code,
     layer_shell_header,

@@ -60,8 +60,10 @@
 #include <wlr/render/wlr_texture.h>
 
 #include "desktop_icons.h"
+#include "decorations.h"
 
-#define ADE_TAB_HEIGHT 25
+//#define ADE_TAB_HEIGHT 25
+#define ADE_TAB_HEIGHT (ade_decor_tab_height())
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum tinywl_cursor_mode {
