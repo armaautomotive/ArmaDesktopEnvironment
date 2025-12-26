@@ -62,6 +62,7 @@ enum tinywl_cursor_mode {
     TINYWL_CURSOR_MOVE,
     TINYWL_CURSOR_RESIZE,
     TINYWL_CURSOR_TABDRAG,
+    TINYWL_CURSOR_ICONDRAG,
 };
 
 
@@ -119,6 +120,15 @@ struct tinywl_server {
     // Desktop icon double-click tracking
     uint32_t last_icon_click_msec;
     int icon_click_count;
+    
+    // Desktop icon drag state
+    struct wlr_scene_node *dragged_icon_node;
+    double icon_grab_dx;
+    double icon_grab_dy;
+    bool icon_drag_candidate;
+    bool icon_dragging;
+    double icon_press_x;
+    double icon_press_y;
 };
 
 
@@ -941,6 +951,11 @@ static void reset_cursor_mode(struct tinywl_server *server) {
     /* Reset the cursor mode to passthrough. */
     server->cursor_mode = TINYWL_CURSOR_PASSTHROUGH;
     server->grabbed_toplevel = NULL;
+    
+    // Clear desktop icon drag state
+    server->dragged_icon_node = NULL;
+    server->icon_drag_candidate = false;
+    server->icon_dragging = false;
 }
 
 static void process_cursor_move(struct tinywl_server *server) {
@@ -1003,6 +1018,17 @@ static void process_cursor_resize(struct tinywl_server *server) {
 }
 
 static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
+    // If the user pressed on an icon, begin dragging after a small motion threshold
+    if (server->icon_drag_candidate && !server->icon_dragging && server->dragged_icon_node != NULL) {
+        const double thresh = 5.0;
+        double dx = server->cursor->x - server->icon_press_x;
+        double dy = server->cursor->y - server->icon_press_y;
+        if (dx * dx + dy * dy >= thresh * thresh) {
+            server->icon_dragging = true;
+            server->cursor_mode = TINYWL_CURSOR_ICONDRAG;
+        }
+    }
+    
     /* If the mode is non-passthrough, delegate to those functions. */
     if (server->cursor_mode == TINYWL_CURSOR_MOVE) {
         process_cursor_move(server);
@@ -1031,6 +1057,14 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
 
             toplevel->tab_x_px = desired_x;
             wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, -22);
+        }
+        return;
+    }
+    else if (server->cursor_mode == TINYWL_CURSOR_ICONDRAG) {
+        if (server->dragged_icon_node != NULL) {
+            int nx = (int)(server->cursor->x - server->icon_grab_dx);
+            int ny = (int)(server->cursor->y - server->icon_grab_dy);
+            wlr_scene_node_set_position(server->dragged_icon_node, nx, ny);
         }
         return;
     }
@@ -1106,8 +1140,37 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     struct tinywl_server *server =
         wl_container_of(listener, server, cursor_button);
     struct wlr_pointer_button_event *event = data;
-    // If you released any buttons, we exit interactive move/resize mode.
+    // If you released any buttons, we may exit interactive modes.
     if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+        // Desktop icon: drop on release; if it was a click (not a drag), allow double-click launch.
+        if (event->button == BTN_LEFT &&
+            (server->cursor_mode == TINYWL_CURSOR_ICONDRAG || server->icon_drag_candidate)) {
+
+            bool dragged = server->icon_dragging;
+
+            if (!dragged) {
+                const uint32_t dbl_ms = 400;
+
+                if (server->last_icon_click_msec != 0 &&
+                    (event->time_msec - server->last_icon_click_msec) <= dbl_ms) {
+                    server->icon_click_count++;
+                } else {
+                    server->icon_click_count = 1;
+                }
+
+                server->last_icon_click_msec = event->time_msec;
+
+                if (server->icon_click_count >= 2) {
+                    server->icon_click_count = 0;
+                    server->last_icon_click_msec = 0;
+                    ade_launch_terminal();
+                }
+            }
+
+            reset_cursor_mode(server);
+            return; // Do not forward icon clicks/drags to clients
+        }
+
         reset_cursor_mode(server);
         // Still notify release to the client which had pointer focus.
         wlr_seat_pointer_notify_button(server->seat,
@@ -1120,7 +1183,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     struct wlr_scene_node *node = wlr_scene_node_at(
         &server->scene->tree.node, server->cursor->x, server->cursor->y, &sx, &sy);
 
-    // Desktop icon handling (double-click to launch terminal)
+    // Desktop icon handling (arm drag on press)
     if (event->button == BTN_LEFT &&
         event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
         node != NULL) {
@@ -1135,24 +1198,29 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
         }
 
         if (hit_terminal_icon) {
-            const uint32_t dbl_ms = 400;
+            // Arm icon drag; we only start dragging after a small motion threshold.
+            server->icon_drag_candidate = true;
+            server->icon_dragging = false;
+            server->icon_press_x = server->cursor->x;
+            server->icon_press_y = server->cursor->y;
 
-            if (server->last_icon_click_msec != 0 &&
-                (event->time_msec - server->last_icon_click_msec) <= dbl_ms) {
-                server->icon_click_count++;
+            if (server->terminal_icon_scene != NULL) {
+                server->dragged_icon_node = &server->terminal_icon_scene->node;
+            } else if (server->terminal_icon_rect != NULL) {
+                server->dragged_icon_node = &server->terminal_icon_rect->node;
             } else {
-                server->icon_click_count = 1;
+                server->dragged_icon_node = NULL;
             }
 
-            server->last_icon_click_msec = event->time_msec;
-
-            if (server->icon_click_count >= 2) {
-                server->icon_click_count = 0;
-                server->last_icon_click_msec = 0;
-                ade_launch_terminal();
+            if (server->dragged_icon_node != NULL) {
+                server->icon_grab_dx = server->cursor->x - server->dragged_icon_node->x;
+                server->icon_grab_dy = server->cursor->y - server->dragged_icon_node->y;
+            } else {
+                server->icon_grab_dx = 0;
+                server->icon_grab_dy = 0;
             }
 
-            // Don't forward icon clicks to clients
+            // Don't forward icon presses to clients
             return;
         }
     }
@@ -1813,6 +1881,14 @@ int main(int argc, char *argv[]) {
     
     server.last_icon_click_msec = 0;
     server.icon_click_count = 0;
+    
+    server.dragged_icon_node = NULL;
+    server.icon_grab_dx = 0;
+    server.icon_grab_dy = 0;
+    server.icon_drag_candidate = false;
+    server.icon_dragging = false;
+    server.icon_press_x = 0;
+    server.icon_press_y = 0;
     
     
     /* The Wayland display is managed by libwayland. It handles accepting
