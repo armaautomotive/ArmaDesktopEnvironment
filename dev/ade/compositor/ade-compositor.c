@@ -880,11 +880,10 @@ static void ade_set_tab_selected(struct tinywl_toplevel *toplevel, bool selected
         return;
     }
 
-    // Classic BeOS-ish colors: focused = yellow, unfocused = light grey
-    static const float col_selected[4]   = { 1.0f, 0.85f, 0.20f, 1.0f };
-    static const float col_unselected[4] = { 0.85f, 0.85f, 0.85f, 1.0f };
-
-    wlr_scene_rect_set_color(toplevel->tab_rect, selected ? col_selected : col_unselected);
+    // Delegate styling to decorations.c
+    float col[4] = {0, 0, 0, 1};
+    ade_decor_tab_color(selected, col);
+    wlr_scene_rect_set_color(toplevel->tab_rect, col);
 }
 
 
@@ -3028,6 +3027,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
+    // Decorations backend init (ops interface)
+    ade_decorations_get_ops()->init(&server);
     if (server.scene_layout == NULL) {
         wlr_log(WLR_ERROR, "ADE: failed to attach scene to output layout");
         wlr_scene_node_destroy(&server.scene->tree.node);
