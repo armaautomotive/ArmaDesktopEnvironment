@@ -1,7 +1,20 @@
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
+// Feature-test macros (must be defined before any system headers)
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#include <time.h>
+#include <stdlib.h>
+#include <string.h>
 
+// wlroots buffer interface (needed for wlr_buffer_impl + wlr_buffer_init)
+#include <wlr/interfaces/wlr_buffer.h>
+
+// stb (install on Arch with: pacman -S stb)
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb/stb_image.h>
 
 #include <drm_fourcc.h>
 #include <wlr/types/wlr_buffer.h>
@@ -35,6 +48,7 @@
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
+
 #include <wlr/util/log.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <xkbcommon/xkbcommon.h>
@@ -99,7 +113,6 @@ struct tinywl_server {
 
     // Desktop icons
     struct wlr_scene_tree *desktop_icons;
-    struct wlr_buffer *terminal_icon_wlrbuf;
     struct wlr_scene_buffer *terminal_icon_scene;
     struct wlr_scene_rect *terminal_icon_rect;
 };
@@ -110,6 +123,7 @@ struct tinywl_output {
     struct wl_list link;
     struct tinywl_server *server;
     struct wlr_output *wlr_output;
+    struct wlr_scene_output *scene_output;
     struct wl_listener frame;
     struct wl_listener request_state;
     struct wl_listener destroy;
@@ -200,51 +214,37 @@ static void ade_spawn_shell(const char *sh_cmd) {
 // Forward declarations
 static void ade_update_background(struct tinywl_server *server);
 
+
 // -----------------------------------------------------------------------------
 // PNG -> wlr_buffer helper (wlroots 0.20)
-// We wrap decoded RGBA pixels into a wlr_buffer so wlr_scene_buffer can render it.
 // -----------------------------------------------------------------------------
-
 struct ade_pixel_buffer {
     struct wlr_buffer base;
-    uint8_t *data;
-    size_t size;
     int width;
     int height;
     size_t stride;
-    uint32_t format; // DRM fourcc
+    uint32_t format; // DRM_FORMAT_*
+    uint8_t *data;
 };
 
-static void ade_pixel_buffer_destroy(struct wlr_buffer *wlr_buf) {
-    struct ade_pixel_buffer *buf = (struct ade_pixel_buffer *)wlr_buf;
-    if (buf->data) {
-        free(buf->data);
-        buf->data = NULL;
-    }
+static void ade_pixel_buffer_destroy(struct wlr_buffer *wlr_buffer) {
+    struct ade_pixel_buffer *buf = wl_container_of(wlr_buffer, buf, base);
+    free(buf->data);
     free(buf);
 }
 
-static bool ade_pixel_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buf,
+static bool ade_pixel_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer,
         uint32_t flags, void **data, uint32_t *format, size_t *stride) {
     (void)flags;
-    struct ade_pixel_buffer *buf = (struct ade_pixel_buffer *)wlr_buf;
-    if (!buf || !buf->data) {
-        return false;
-    }
-    if (data) {
-        *data = buf->data;
-    }
-    if (format) {
-        *format = buf->format;
-    }
-    if (stride) {
-        *stride = buf->stride;
-    }
+    struct ade_pixel_buffer *buf = wl_container_of(wlr_buffer, buf, base);
+    if (data) *data = buf->data;
+    if (format) *format = buf->format;
+    if (stride) *stride = buf->stride;
     return true;
 }
 
-static void ade_pixel_buffer_end_data_ptr_access(struct wlr_buffer *wlr_buf) {
-    (void)wlr_buf;
+static void ade_pixel_buffer_end_data_ptr_access(struct wlr_buffer *wlr_buffer) {
+    (void)wlr_buffer;
 }
 
 static const struct wlr_buffer_impl ade_pixel_buffer_impl = {
@@ -254,19 +254,18 @@ static const struct wlr_buffer_impl ade_pixel_buffer_impl = {
 };
 
 static struct wlr_buffer *ade_load_png_as_wlr_buffer(const char *path) {
-    int w = 0, h = 0, comp = 0;
-    // Force RGBA
-    unsigned char *rgba = stbi_load(path, &w, &h, &comp, 4);
-    if (!rgba || w <= 0 || h <= 0) {
-        wlr_log(WLR_ERROR, "ADE: failed to load PNG '%s'", path);
-        if (rgba) stbi_image_free(rgba);
+    if (path == NULL) {
         return NULL;
     }
 
-    // wlroots expects a DRM format. We'll provide DRM_FORMAT_ABGR8888.
-    // stb gives RGBA byte order; convert per-pixel: RGBA -> ABGR.
-    size_t stride = (size_t)w * 4;
-    size_t size = stride * (size_t)h;
+    int w = 0, h = 0, n = 0;
+    // Force 4 channels (RGBA)
+    unsigned char *rgba = stbi_load(path, &w, &h, &n, 4);
+    if (!rgba || w <= 0 || h <= 0) {
+        wlr_log(WLR_ERROR, "ADE: failed to load PNG %s", path);
+        if (rgba) stbi_image_free(rgba);
+        return NULL;
+    }
 
     struct ade_pixel_buffer *buf = calloc(1, sizeof(*buf));
     if (!buf) {
@@ -274,41 +273,24 @@ static struct wlr_buffer *ade_load_png_as_wlr_buffer(const char *path) {
         return NULL;
     }
 
-    buf->data = malloc(size);
+    buf->width = w;
+    buf->height = h;
+    buf->stride = (size_t)w * 4;
+    // stb gives RGBA bytes; DRM_FORMAT_ABGR8888 matches that byte layout on little-endian
+    buf->format = DRM_FORMAT_ABGR8888;
+    buf->data = malloc(buf->stride * (size_t)h);
     if (!buf->data) {
         free(buf);
         stbi_image_free(rgba);
         return NULL;
     }
-
-    buf->size = size;
-    buf->width = w;
-    buf->height = h;
-    buf->stride = stride;
-    buf->format = DRM_FORMAT_ABGR8888;
-
-    for (int y = 0; y < h; y++) {
-        const uint8_t *src = (const uint8_t *)rgba + (size_t)y * stride;
-        uint8_t *dst = (uint8_t *)buf->data + (size_t)y * stride;
-        for (int x = 0; x < w; x++) {
-            uint8_t r = src[x * 4 + 0];
-            uint8_t g = src[x * 4 + 1];
-            uint8_t b = src[x * 4 + 2];
-            uint8_t a = src[x * 4 + 3];
-            // ABGR memory layout
-            dst[x * 4 + 0] = a;
-            dst[x * 4 + 1] = b;
-            dst[x * 4 + 2] = g;
-            dst[x * 4 + 3] = r;
-        }
-    }
-
+    memcpy(buf->data, rgba, buf->stride * (size_t)h);
     stbi_image_free(rgba);
 
-    // Initialize wlr_buffer
-    wlr_buffer_init(&buf->base, &ade_pixel_buffer_impl, w, h);
+    wlr_buffer_init(&buf->base, &ade_pixel_buffer_impl, (size_t)w, (size_t)h);
     return &buf->base;
 }
+
 
 
 static void ade_show_help(void) {
@@ -1147,10 +1129,11 @@ static void output_frame(struct wl_listener *listener, void *data) {
     /* This function is called every time an output is ready to display a frame,
      * generally at the output's refresh rate (e.g. 60Hz). */
     struct tinywl_output *output = wl_container_of(listener, output, frame);
-    struct wlr_scene *scene = output->server->scene;
-
-    struct wlr_scene_output *scene_output = wlr_scene_get_scene_output(
-        scene, output->wlr_output);
+    struct wlr_scene_output *scene_output = output->scene_output;
+    if (scene_output == NULL) {
+        wlr_log(WLR_ERROR, "ADE: output_frame called but scene_output is NULL");
+        return;
+    }
 
     /* Render the scene if needed and commit the output */
     wlr_scene_output_commit(scene_output, NULL);
@@ -1195,6 +1178,7 @@ static void output_destroy(struct wl_listener *listener, void *data) {
     wl_list_remove(&output->request_state.link);
     wl_list_remove(&output->destroy.link);
     wl_list_remove(&output->link);
+    output->scene_output = NULL;
     free(output);
 }
 
@@ -1258,8 +1242,12 @@ static void server_new_output(struct wl_listener *listener, void *data) {
      */
     struct wlr_output_layout_output *l_output = wlr_output_layout_add_auto(server->output_layout,
         wlr_output);
-    struct wlr_scene_output *scene_output = wlr_scene_output_create(server->scene, wlr_output);
-    wlr_scene_output_layout_add_output(server->scene_layout, l_output, scene_output);
+    output->scene_output = wlr_scene_output_create(server->scene, wlr_output);
+    if (output->scene_output == NULL) {
+        wlr_log(WLR_ERROR, "ADE: failed to create scene_output for %s", wlr_output->name ? wlr_output->name : "(unnamed)");
+    } else {
+        wlr_scene_output_layout_add_output(server->scene_layout, l_output, output->scene_output);
+    }
 
     // Resize background to match the largest output now that we have one.
     ade_update_background(server);
@@ -1794,21 +1782,21 @@ int main(int argc, char *argv[]) {
     // Desktop icon layer
     server.desktop_icons = wlr_scene_tree_create(&server.scene->tree);
 
-    // Try to load a real PNG icon; fallback to a placeholder rectangle.
-    server.terminal_icon_wlrbuf = ade_load_png_as_wlr_buffer("icons/128x128/apps/terminal.png");
+    // Desktop icon (try PNG first, fall back to a placeholder rect)
     server.terminal_icon_scene = NULL;
     server.terminal_icon_rect = NULL;
 
-    if (server.terminal_icon_wlrbuf != NULL) {
-        server.terminal_icon_scene = wlr_scene_buffer_create(server.desktop_icons, server.terminal_icon_wlrbuf);
+    const char *terminal_png = "icons/128x128/apps/terminal.png";
+    struct wlr_buffer *icon_buf = ade_load_png_as_wlr_buffer(terminal_png);
+    if (icon_buf != NULL) {
+        server.terminal_icon_scene = wlr_scene_buffer_create(server.desktop_icons, icon_buf);
+        // scene_buffer_create takes ownership via refcounting; we can drop our ref
+        wlr_buffer_drop(icon_buf);
+
         if (server.terminal_icon_scene != NULL) {
-            // Display at 64x64 regardless of source image size.
             wlr_scene_node_set_position(&server.terminal_icon_scene->node, 40, 40);
-            wlr_scene_buffer_set_dest_size(server.terminal_icon_scene, 64, 64);
-            wlr_scene_node_raise_to_top(&server.terminal_icon_scene->node);
-            wlr_log(WLR_INFO, "ADE: loaded PNG desktop icon icons/128x128/apps/terminal.png");
         } else {
-            wlr_log(WLR_ERROR, "ADE: wlr_scene_buffer_create failed, using placeholder icon");
+            wlr_log(WLR_ERROR, "ADE: wlr_scene_buffer_create failed for %s", terminal_png);
         }
     }
 
@@ -1816,8 +1804,9 @@ int main(int argc, char *argv[]) {
         float icon_col[4] = { 0.90f, 0.90f, 0.90f, 1.0f }; // light gray placeholder
         server.terminal_icon_rect = wlr_scene_rect_create(server.desktop_icons, 64, 64, icon_col);
         wlr_scene_node_set_position(&server.terminal_icon_rect->node, 40, 40);
-        wlr_scene_node_raise_to_top(&server.desktop_icons->node);
     }
+
+    wlr_scene_node_raise_to_top(&server.desktop_icons->node);
 
     wlr_scene_node_lower_to_bottom(&server.bg_rect->node);
     
@@ -1952,11 +1941,6 @@ int main(int argc, char *argv[]) {
 
     wl_list_remove(&server.new_output.link);
 
-    // Free desktop icon buffer we allocated (scene should have dropped refs by now)
-    if (server.terminal_icon_wlrbuf) {
-        wlr_buffer_drop(server.terminal_icon_wlrbuf);
-        server.terminal_icon_wlrbuf = NULL;
-    }
 
     wlr_scene_node_destroy(&server.scene->tree.node);
     wlr_xcursor_manager_destroy(server.cursor_mgr);
