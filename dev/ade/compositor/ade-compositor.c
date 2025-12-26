@@ -841,44 +841,73 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
     }
 }
 
+// Set tab background color based on focus/selection state
+static void ade_set_tab_selected(struct tinywl_toplevel *toplevel, bool selected) {
+    if (toplevel == NULL || toplevel->tab_rect == NULL) {
+        return;
+    }
+
+    // Classic BeOS-ish colors: focused = yellow, unfocused = light grey
+    static const float col_selected[4]   = { 1.0f, 0.85f, 0.20f, 1.0f };
+    static const float col_unselected[4] = { 0.85f, 0.85f, 0.85f, 1.0f };
+
+    wlr_scene_rect_set_color(toplevel->tab_rect, selected ? col_selected : col_unselected);
+}
+
 
 static void focus_toplevel(struct tinywl_toplevel *toplevel) {
     /* Note: this function only deals with keyboard focus. */
     if (toplevel == NULL) {
         return;
     }
+
     struct tinywl_server *server = toplevel->server;
     struct wlr_seat *seat = server->seat;
     struct wlr_surface *prev_surface = seat->keyboard_state.focused_surface;
     struct wlr_surface *surface = toplevel->xdg_toplevel->base->surface;
+
+    /*
+     * Important: Don't clear tab colors before we check for "already focused".
+     * Otherwise the yellow tab can disappear when clicking inside the already
+     * focused window.
+     */
     if (prev_surface == surface) {
-        /* Don't re-focus an already focused surface. */
+        /* Ensure the visual state stays correct even if focus didn't change. */
+        struct tinywl_toplevel *it;
+        wl_list_for_each(it, &server->toplevels, link) {
+            ade_set_tab_selected(it, false);
+        }
+        ade_set_tab_selected(toplevel, true);
         return;
     }
+
     if (prev_surface) {
-        /*
-         * Deactivate the previously focused surface. This lets the client know
-         * it no longer has focus and the client will repaint accordingly, e.g.
-         * stop displaying a caret.
-         */
+        /* Deactivate previously focused surface. */
         struct wlr_xdg_toplevel *prev_toplevel =
             wlr_xdg_toplevel_try_from_wlr_surface(prev_surface);
         if (prev_toplevel != NULL) {
             wlr_xdg_toplevel_set_activated(prev_toplevel, false);
         }
     }
+
     struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
+
     /* Move the toplevel to the front */
     wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
     wl_list_remove(&toplevel->link);
     wl_list_insert(&server->toplevels, &toplevel->link);
+
     /* Activate the new surface */
     wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
-    /*
-     * Tell the seat to have the keyboard enter this surface. wlroots will keep
-     * track of this and automatically send key events to the appropriate
-     * clients without additional work on your part.
-     */
+
+    /* Update tab colors: selected (focused) = yellow, others = light grey */
+    struct tinywl_toplevel *it;
+    wl_list_for_each(it, &server->toplevels, link) {
+        ade_set_tab_selected(it, false);
+    }
+    ade_set_tab_selected(toplevel, true);
+
+    /* Notify keyboard focus */
     if (keyboard != NULL) {
         wlr_seat_keyboard_notify_enter(seat, surface,
             keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
@@ -1733,8 +1762,11 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
         }
     }
 
-    // Render the window title into the yellow tab
+    // Render the window title into the tab
     ade_tab_render_title(toplevel, toplevel->xdg_toplevel->title);
+
+    // Default to unfocused appearance until focus_toplevel decides otherwise
+    ade_set_tab_selected(toplevel, false);
 
     focus_toplevel(toplevel);
 }
@@ -1945,7 +1977,8 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, -22);
 
     /* BeOS-style yellow tab (rect is inside tab_tree so it moves with it) */
-    float yellow[4] = { 1.0f, 0.85f, 0.2f, 1.0f };
+    // Start unfocused tabs as light grey; focus_toplevel() will turn the active one yellow
+    float yellow[4] = { 0.85f, 0.85f, 0.85f, 1.0f };
 
     toplevel->tab_rect = wlr_scene_rect_create(
         toplevel->tab_tree,
