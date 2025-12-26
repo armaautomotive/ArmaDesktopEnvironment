@@ -2120,6 +2120,11 @@ static void ade_update_background(struct tinywl_server *server) {
 
 int main(int argc, char *argv[]) {
 
+    // Some VM/nested backends have broken hardware cursors (offset/inverted).
+    // Force software cursors so the drawn cursor matches click coordinates.
+    setenv("WLR_NO_HARDWARE_CURSORS", "1", 1);
+
+
 
     wlr_log_init(WLR_DEBUG, NULL);
     char *startup_cmd = NULL;
@@ -2412,6 +2417,3 @@ int main(int argc, char *argv[]) {
     
     return 0;
 }
-
-// Cursor reload for output (handles per-output scale, wlroots 0.20 safe)
-static void ade_reload_cursor_for_output(struct tinywl_server *server, struct wlr_output *out);
