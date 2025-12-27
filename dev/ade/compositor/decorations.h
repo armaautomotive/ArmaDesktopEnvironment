@@ -30,3 +30,6 @@ struct ade_decorations_ops {
 
 /* Active decorations backend (never NULL) */
 const struct ade_decorations_ops *ade_decorations_get_ops(void);
+
+int ade_decor_tab_height(void);
+void ade_decor_tab_color(bool selected, float out_rgba[4]);

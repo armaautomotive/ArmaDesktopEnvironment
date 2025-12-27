@@ -2331,6 +2331,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
     // Render the window title into the tab
     ade_tab_render_title(toplevel, toplevel->xdg_toplevel->title);
+    ade_decorations_get_ops()->toplevel_set_title(toplevel, toplevel->xdg_toplevel->title);
 
     // Default to unfocused appearance until focus_toplevel decides otherwise
     ade_set_tab_selected(toplevel, false);
@@ -2377,36 +2378,18 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 }
 
 static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
+    (void)data;
     /* Called when a new surface state is committed. */
     struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, commit);
 
     // Update tab title on commits (clients can set title after mapping)
     if (toplevel->xdg_toplevel != NULL) {
         ade_tab_render_title(toplevel, toplevel->xdg_toplevel->title);
+        ade_decorations_get_ops()->toplevel_set_title(toplevel, toplevel->xdg_toplevel->title);
     }
 
-    // --- Window border geometry sync ---
-    struct wlr_box geo = toplevel->xdg_toplevel->base->geometry;
-    int w = geo.width;
-    int h = geo.height;
-    const int bw = 1;
-
-    if (toplevel->border_top) {
-        wlr_scene_rect_set_size(toplevel->border_top, w, bw);
-        wlr_scene_node_set_position(&toplevel->border_top->node, 0, -bw);
-    }
-    if (toplevel->border_bottom) {
-        wlr_scene_rect_set_size(toplevel->border_bottom, w, bw);
-        wlr_scene_node_set_position(&toplevel->border_bottom->node, 0, h);
-    }
-    if (toplevel->border_left) {
-        wlr_scene_rect_set_size(toplevel->border_left, bw, h);
-        wlr_scene_node_set_position(&toplevel->border_left->node, -bw, 0);
-    }
-    if (toplevel->border_right) {
-        wlr_scene_rect_set_size(toplevel->border_right, bw, h);
-        wlr_scene_node_set_position(&toplevel->border_right->node, w, 0);
-    }
+    // Keep decorations in sync (borders/tab geometry)
+    ade_decorations_get_ops()->toplevel_commit(toplevel);
 
     if (toplevel->xdg_toplevel->base->initial_commit) {
         /* When an xdg_surface performs an initial commit, the compositor must
@@ -2425,11 +2408,8 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
     ade_tab_clear_close(toplevel);
     ade_tab_clear_expand(toplevel);
 
-    // Destroy window border nodes
-    if (toplevel->border_top) wlr_scene_node_destroy(&toplevel->border_top->node);
-    if (toplevel->border_bottom) wlr_scene_node_destroy(&toplevel->border_bottom->node);
-    if (toplevel->border_left) wlr_scene_node_destroy(&toplevel->border_left->node);
-    if (toplevel->border_right) wlr_scene_node_destroy(&toplevel->border_right->node);
+    // Decorations backend cleanup
+    ade_decorations_get_ops()->toplevel_destroy(toplevel);
 
     wl_list_remove(&toplevel->map.link);
     
@@ -2545,60 +2525,18 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     xdg_toplevel->base->data = toplevel->scene_tree;
 
     
-    /* Create decoration tree above the window */
-    toplevel->decor_tree =
-        wlr_scene_tree_create(toplevel->scene_tree);
+    // Decorations are provided by the decorations backend.
+    ade_decorations_get_ops()->toplevel_create(toplevel);
 
-    // Simple gray window border (BeOS-style)
-    float border_col[4] = { 0.65f, 0.65f, 0.65f, 1.0f };
-    const int bw = 1;
-    // geometry will be corrected on map/commit
-    struct wlr_box geo = xdg_toplevel->base->geometry;
-    int w = geo.width  > 0 ? geo.width  : 800;
-    int h = geo.height > 0 ? geo.height : 600;
-    // Top
-    toplevel->border_top = wlr_scene_rect_create(toplevel->decor_tree, w, bw, border_col);
-    wlr_scene_node_set_position(&toplevel->border_top->node, 0, -bw);
-    // Bottom
-    toplevel->border_bottom = wlr_scene_rect_create(toplevel->decor_tree, w, bw, border_col);
-    wlr_scene_node_set_position(&toplevel->border_bottom->node, 0, h);
-    // Left
-    toplevel->border_left = wlr_scene_rect_create(toplevel->decor_tree, bw, h, border_col);
-    wlr_scene_node_set_position(&toplevel->border_left->node, -bw, 0);
-    // Right
-    toplevel->border_right = wlr_scene_rect_create(toplevel->decor_tree, bw, h, border_col);
-    wlr_scene_node_set_position(&toplevel->border_right->node, w, 0);
-
-    /* Tab container (movable along the top edge) */
-    toplevel->tab_tree = wlr_scene_tree_create(toplevel->decor_tree);
-    toplevel->tab_x_px = 0;       // start left
-    toplevel->tab_width_px = 180; // default until title render computes
-    wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, -22);
-
-    /* BeOS-style yellow tab (rect is inside tab_tree so it moves with it) */
-    // Start unfocused tabs as light grey; focus_toplevel() will turn the active one yellow
-    float yellow[4] = { 0.85f, 0.85f, 0.85f, 1.0f };
-
-    toplevel->tab_rect = wlr_scene_rect_create(
-        toplevel->tab_tree,
-        160,   // tab width
-        ADE_TAB_HEIGHT,    // tab height
-        yellow
-    );
-
-    /* tab_rect at (0,0) inside tab_tree */
-    wlr_scene_node_set_position(&toplevel->tab_rect->node, 0, 0);
-    
-    
-
-    toplevel->tab_text_tree = NULL;
-    toplevel->close_tree = NULL;
-    toplevel->close_bg = NULL;
-    toplevel->close_x_tree = NULL;
-
+    // Render the title (legacy helper for now) and notify backend
     ade_tab_render_title(toplevel, xdg_toplevel->title);
+    ade_decorations_get_ops()->toplevel_set_title(toplevel, xdg_toplevel->title);
 
-    wlr_scene_node_raise_to_top(&toplevel->tab_tree->node);
+    if (toplevel->tab_tree) {
+        wlr_scene_node_raise_to_top(&toplevel->tab_tree->node);
+    }
+    
+  
 
     /* Listen to the various events it can emit */
     toplevel->map.notify = xdg_toplevel_map;
@@ -3046,6 +2984,10 @@ int main(int argc, char *argv[]) {
         wl_display_destroy(server.wl_display);
         return 1;
     }
+    
+    // Decorations backend init (ops interface)
+    ade_decorations_get_ops()->init(&server);
+    
 
     // BeOS-like blue desktop background
     float beos_blue[4] = { 0.1608f, 0.3137f, 0.5255f, 1.0f };
@@ -3319,6 +3261,7 @@ int main(int argc, char *argv[]) {
         wl_list_remove(&server.new_xdg_decoration.link);
     }
     
+    ade_decorations_get_ops()->finish(&server);
 
     wlr_scene_node_destroy(&server.scene->tree.node);
     wlr_xcursor_manager_destroy(server.cursor_mgr);
