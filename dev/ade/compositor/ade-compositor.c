@@ -1390,7 +1390,7 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
 
             int tab_w = (toplevel->tab_width_px > 0) ? toplevel->tab_width_px : 160;
 
-            int min_x = 0;
+            int min_x = -ADE_LEFT_RESIZE_GRIP_W;
             int max_x = win_w - tab_w;
             if (max_x < min_x) max_x = min_x;
 
@@ -1398,7 +1398,7 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
             if (desired_x > max_x) desired_x = max_x;
 
             toplevel->tab_x_px = desired_x;
-            wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, -ADE_TAB_HEIGHT);
+            wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, ADE_TAB_Y);
         }
         return;
     }
