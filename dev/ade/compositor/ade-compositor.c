@@ -66,7 +66,9 @@
 
 #include "desktop_icons.h"
 
-#define ADE_TAB_HEIGHT 26
+#define ADE_TAB_HEIGHT 27
+// Vertical offset (in pixels) for text and buttons inside the yellow tab
+#define ADE_TAB_CONTENT_Y_OFFSET 6
 #define ADE_TAB_GAP_ABOVE_FRAME 5
 // Tab bottom is 6px above the top border (border is 1px)
 #define ADE_TAB_Y (-(ADE_TAB_HEIGHT + ADE_TAB_GAP_ABOVE_FRAME + 0))
@@ -771,7 +773,7 @@ static void ade_tab_build_close(struct tinywl_toplevel *toplevel, int tab_width)
     // Button geometry within the tab (LEFT side)
     const int margin_left = 10;
     const int btn_size = 16;  // square button
-    const int btn_y = 3;    // inside tab (tab y=-22 .. 0)
+    const int btn_y = ADE_TAB_CONTENT_Y_OFFSET;
     int btn_x = margin_left;
 
     toplevel->close_tree = wlr_scene_tree_create(toplevel->tab_tree);
@@ -806,7 +808,7 @@ static void ade_tab_build_expand(struct tinywl_toplevel *toplevel, int tab_width
 
     const int margin_right = 10;
     const int btn_size = 16;
-    const int btn_y = 3;
+    const int btn_y = ADE_TAB_CONTENT_Y_OFFSET;
     int btn_x = tab_width - margin_right - btn_size;
     if (btn_x < 0) btn_x = 0;
 
@@ -866,7 +868,7 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
     const int left_pad = 14 + close_btn_pad_left + close_btn_w + close_btn_gap;
     const int right_pad = expand_btn_pad_right + expand_btn_w + expand_btn_gap;
     int origin_x = left_pad;
-    int origin_y = 4; // inside tab (tab starts at -22)
+    int origin_y = ADE_TAB_CONTENT_Y_OFFSET + 1;
 
     // Text color: a darker brown-ish for contrast (RGB only here)
     const float ink_rgb[3] = { 0.25f, 0.18f, 0.05f };
