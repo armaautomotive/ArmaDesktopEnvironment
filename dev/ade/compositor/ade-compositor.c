@@ -251,6 +251,20 @@ struct tinywl_toplevel {
     // Grey detail line at right edge of the corner resize grip
     struct wlr_scene_rect *corner_ru_resize_grip_line_right;
     
+    struct wlr_scene_rect *corner_lu_resize_grip; //
+    // Grey detail line at top of the corner resize grip
+    struct wlr_scene_rect *corner_lu_resize_grip_line_top;
+    // Grey detail line at left edge of the corner resize grip
+    struct wlr_scene_rect *corner_lu_resize_grip_line_left;
+    
+    // Bottom-left corner resize grip (6x6 outside the window)
+    struct wlr_scene_rect *corner_bl_resize_grip; //
+    // Grey detail line at bottom of the corner resize grip
+    struct wlr_scene_rect *corner_bl_resize_grip_line_bottom;
+    // Grey detail line at left edge of the corner resize grip
+    struct wlr_scene_rect *corner_bl_resize_grip_line_left;
+    
+    
     
     struct wl_listener map;
     struct wl_listener unmap;
@@ -951,6 +965,7 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
         ade_tab_build_gradient(toplevel, desired_w);
     }
     
+    
     // Keep tab edge detail lines aligned with the current tab size
     if (toplevel->tab_line_left) {
         wlr_scene_rect_set_size(toplevel->tab_line_left, 1, ADE_TAB_HEIGHT);
@@ -967,6 +982,7 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
         wlr_scene_node_set_position(&toplevel->tab_line_top->node, 0, 0);
         wlr_scene_node_raise_to_top(&toplevel->tab_line_top->node);
     }
+     
 
     // Build/rebuild close button for this tab width
     ade_tab_build_close(toplevel, desired_w);
@@ -2101,6 +2117,15 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
         }
     }
     
+    // Bottom-left corner resize grip: click-drag to resize bottom + left
+    if (clicked_toplevel != NULL && event->button == BTN_LEFT) {
+        if (clicked_toplevel->corner_bl_resize_grip != NULL &&
+            node == &clicked_toplevel->corner_bl_resize_grip->node) {
+            begin_interactive(clicked_toplevel, TINYWL_CURSOR_RESIZE, WLR_EDGE_BOTTOM | WLR_EDGE_LEFT);
+            return;
+        }
+    }
+    
     // Bottom-right corner resize grip: click-drag to resize right + bottom
     if (clicked_toplevel != NULL && event->button == BTN_LEFT) {
         if (clicked_toplevel->corner_rl_resize_grip != NULL &&
@@ -2120,7 +2145,14 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
         }
     }
     
-    
+    // Top-left corner resize grip: click-drag to resize top + left
+    if (clicked_toplevel != NULL && event->button == BTN_LEFT) {
+        if (clicked_toplevel->corner_lu_resize_grip != NULL &&
+            node == &clicked_toplevel->corner_lu_resize_grip->node) {
+            begin_interactive(clicked_toplevel, TINYWL_CURSOR_RESIZE, WLR_EDGE_TOP | WLR_EDGE_LEFT);
+            return;
+        }
+    }
     
 
     if (clicked_toplevel != NULL && event->button == BTN_LEFT) {
@@ -2651,6 +2683,28 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
         wlr_scene_node_raise_to_top(&toplevel->corner_ru_resize_grip_line_right->node);
     }
     
+    
+    
+    if (toplevel->corner_lu_resize_grip) {
+        wlr_scene_rect_set_size(toplevel->corner_lu_resize_grip, ADE_LEFT_RESIZE_GRIP_W, ADE_TOP_RESIZE_GRIP_H);
+        wlr_scene_node_set_position(&toplevel->corner_lu_resize_grip->node,
+            -ADE_LEFT_RESIZE_GRIP_W, -ADE_TOP_RESIZE_GRIP_H);
+        wlr_scene_node_raise_to_top(&toplevel->corner_lu_resize_grip->node);
+    }
+    if (toplevel->corner_lu_resize_grip_line_top) {
+        wlr_scene_rect_set_size(toplevel->corner_lu_resize_grip_line_top, ADE_LEFT_RESIZE_GRIP_W, 1);
+        wlr_scene_node_set_position(&toplevel->corner_lu_resize_grip_line_top->node,
+            -ADE_LEFT_RESIZE_GRIP_W, -ADE_TOP_RESIZE_GRIP_H);
+        wlr_scene_node_raise_to_top(&toplevel->corner_lu_resize_grip_line_top->node);
+    }
+    if (toplevel->corner_lu_resize_grip_line_left) {
+        wlr_scene_rect_set_size(toplevel->corner_lu_resize_grip_line_left, 1, ADE_TOP_RESIZE_GRIP_H);
+        wlr_scene_node_set_position(&toplevel->corner_lu_resize_grip_line_left->node,
+            -ADE_LEFT_RESIZE_GRIP_W, -ADE_TOP_RESIZE_GRIP_H);
+        wlr_scene_node_raise_to_top(&toplevel->corner_lu_resize_grip_line_left->node);
+    }
+    
+    
 
     // Keep the yellow tab above the top resize grip visuals
     if (toplevel->tab_tree) {
@@ -2697,6 +2751,24 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
         wlr_scene_node_raise_to_top(&toplevel->corner_rl_resize_grip->node);
     }
     
+    if (toplevel->corner_bl_resize_grip) {
+        wlr_scene_rect_set_size(toplevel->corner_bl_resize_grip, ADE_LEFT_RESIZE_GRIP_W, ADE_TOP_RESIZE_GRIP_H);
+        wlr_scene_node_set_position(&toplevel->corner_bl_resize_grip->node, -ADE_LEFT_RESIZE_GRIP_W, h);
+        wlr_scene_node_raise_to_top(&toplevel->corner_bl_resize_grip->node);
+    }
+    if (toplevel->corner_bl_resize_grip_line_bottom) {
+        wlr_scene_rect_set_size(toplevel->corner_bl_resize_grip_line_bottom, ADE_LEFT_RESIZE_GRIP_W, 1);
+        wlr_scene_node_set_position(&toplevel->corner_bl_resize_grip_line_bottom->node,
+            -ADE_LEFT_RESIZE_GRIP_W, h + (ADE_TOP_RESIZE_GRIP_H - 1));
+        wlr_scene_node_raise_to_top(&toplevel->corner_bl_resize_grip_line_bottom->node);
+    }
+    if (toplevel->corner_bl_resize_grip_line_left) {
+        wlr_scene_rect_set_size(toplevel->corner_bl_resize_grip_line_left, 1, ADE_TOP_RESIZE_GRIP_H);
+        wlr_scene_node_set_position(&toplevel->corner_bl_resize_grip_line_left->node,
+            -ADE_LEFT_RESIZE_GRIP_W, h);
+        wlr_scene_node_raise_to_top(&toplevel->corner_bl_resize_grip_line_left->node);
+    }
+    
     if (toplevel->corner_rl_resize_grip_line_bottom) {
         wlr_scene_rect_set_size(
             toplevel->corner_rl_resize_grip_line_bottom,
@@ -2725,6 +2797,8 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
         wlr_scene_node_raise_to_top(&toplevel->corner_rl_resize_grip_line_right->node);
     }
     
+    
+    
 
     if (toplevel->xdg_toplevel->base->initial_commit) {
         /* When an xdg_surface performs an initial commit, the compositor must
@@ -2744,6 +2818,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
     ade_tab_clear_expand(toplevel);
     ade_tab_clear_gradient(toplevel);
     
+    
     if (toplevel->tab_line_left) {
         wlr_scene_node_destroy(&toplevel->tab_line_left->node);
         toplevel->tab_line_left = NULL;
@@ -2756,6 +2831,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
         wlr_scene_node_destroy(&toplevel->tab_line_top->node);
         toplevel->tab_line_top = NULL;
     }
+     
 
     // Destroy window border nodes
     if (toplevel->border_top) wlr_scene_node_destroy(&toplevel->border_top->node);
@@ -2791,6 +2867,15 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
     if (toplevel->corner_ru_resize_grip_line_top) wlr_scene_node_destroy(&toplevel->corner_ru_resize_grip_line_top->node);
     if (toplevel->corner_ru_resize_grip_line_right) wlr_scene_node_destroy(&toplevel->corner_ru_resize_grip_line_right->node);
     
+    if (toplevel->corner_lu_resize_grip) wlr_scene_node_destroy(&toplevel->corner_lu_resize_grip->node);
+    if (toplevel->corner_lu_resize_grip_line_top) wlr_scene_node_destroy(&toplevel->corner_lu_resize_grip_line_top->node);
+    if (toplevel->corner_lu_resize_grip_line_left) wlr_scene_node_destroy(&toplevel->corner_lu_resize_grip_line_left->node);
+    
+    
+    if (toplevel->corner_bl_resize_grip) wlr_scene_node_destroy(&toplevel->corner_bl_resize_grip->node);
+    if (toplevel->corner_bl_resize_grip_line_bottom) wlr_scene_node_destroy(&toplevel->corner_bl_resize_grip_line_bottom->node);
+    if (toplevel->corner_bl_resize_grip_line_left) wlr_scene_node_destroy(&toplevel->corner_bl_resize_grip_line_left->node);
+    // ***
     
     wl_list_remove(&toplevel->map.link);
     
@@ -3125,6 +3210,103 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
                 wlr_scene_node_set_position(&toplevel->corner_ru_resize_grip_line_right->node,
                     w + (ADE_LEFT_RESIZE_GRIP_W - 1), -ADE_TOP_RESIZE_GRIP_H);
                 wlr_scene_node_raise_to_top(&toplevel->corner_ru_resize_grip_line_right->node);
+            }
+        }
+    }
+    
+    
+    // Top-left corner resize grip (6x6) outside the window (at x=-W, y=-H)
+    {
+        float corner_col[4] = { 0.92f, 0.92f, 0.92f, 0.28f };
+
+        toplevel->corner_lu_resize_grip = wlr_scene_rect_create(
+            toplevel->decor_tree, ADE_LEFT_RESIZE_GRIP_W, ADE_TOP_RESIZE_GRIP_H, corner_col);
+        if (toplevel->corner_lu_resize_grip) {
+            wlr_scene_node_set_position(
+                &toplevel->corner_lu_resize_grip->node,
+                -ADE_LEFT_RESIZE_GRIP_W,
+                -ADE_TOP_RESIZE_GRIP_H
+            );
+            wlr_scene_node_raise_to_top(&toplevel->corner_lu_resize_grip->node);
+        }
+
+        // Grey top detail line
+        {
+            const float line_col[4] = { 0.54f, 0.54f, 0.54f, 1.0f };
+            toplevel->corner_lu_resize_grip_line_top = wlr_scene_rect_create(
+                toplevel->decor_tree, ADE_LEFT_RESIZE_GRIP_W, 1, line_col);
+            if (toplevel->corner_lu_resize_grip_line_top) {
+                wlr_scene_node_set_position(
+                    &toplevel->corner_lu_resize_grip_line_top->node,
+                    -ADE_LEFT_RESIZE_GRIP_W,
+                    -ADE_TOP_RESIZE_GRIP_H
+                );
+                wlr_scene_node_raise_to_top(&toplevel->corner_lu_resize_grip_line_top->node);
+            }
+        }
+
+        // Grey left detail line
+        {
+            const float line_col[4] = { 0.54f, 0.54f, 0.54f, 1.0f };
+            toplevel->corner_lu_resize_grip_line_left = wlr_scene_rect_create(
+                toplevel->decor_tree, 1, ADE_TOP_RESIZE_GRIP_H, line_col);
+            if (toplevel->corner_lu_resize_grip_line_left) {
+                wlr_scene_node_set_position(
+                    &toplevel->corner_lu_resize_grip_line_left->node,
+                    -ADE_LEFT_RESIZE_GRIP_W,
+                    -ADE_TOP_RESIZE_GRIP_H
+                );
+                wlr_scene_node_raise_to_top(&toplevel->corner_lu_resize_grip_line_left->node);
+            }
+        }
+    }
+    
+    
+    // ***
+    
+    
+    // Bottom-left corner resize grip (6x6) outside the window (at x=-W, y=h)
+    {
+        float corner_col[4] = { 0.92f, 0.92f, 0.92f, 0.28f };
+
+        toplevel->corner_bl_resize_grip = wlr_scene_rect_create(
+            toplevel->decor_tree, ADE_LEFT_RESIZE_GRIP_W, ADE_TOP_RESIZE_GRIP_H, corner_col);
+        if (toplevel->corner_bl_resize_grip) {
+            wlr_scene_node_set_position(
+                &toplevel->corner_bl_resize_grip->node,
+                -ADE_LEFT_RESIZE_GRIP_W,
+                h
+            );
+            wlr_scene_node_raise_to_top(&toplevel->corner_bl_resize_grip->node);
+        }
+
+        // Grey bottom detail line
+        {
+            const float line_col[4] = { 0.54f, 0.54f, 0.54f, 1.0f };
+            toplevel->corner_bl_resize_grip_line_bottom = wlr_scene_rect_create(
+                toplevel->decor_tree, ADE_LEFT_RESIZE_GRIP_W, 1, line_col);
+            if (toplevel->corner_bl_resize_grip_line_bottom) {
+                wlr_scene_node_set_position(
+                    &toplevel->corner_bl_resize_grip_line_bottom->node,
+                    -ADE_LEFT_RESIZE_GRIP_W,
+                    h + (ADE_TOP_RESIZE_GRIP_H - 1)
+                );
+                wlr_scene_node_raise_to_top(&toplevel->corner_bl_resize_grip_line_bottom->node);
+            }
+        }
+
+        // Grey left detail line
+        {
+            const float line_col[4] = { 0.54f, 0.54f, 0.54f, 1.0f };
+            toplevel->corner_bl_resize_grip_line_left = wlr_scene_rect_create(
+                toplevel->decor_tree, 1, ADE_TOP_RESIZE_GRIP_H, line_col);
+            if (toplevel->corner_bl_resize_grip_line_left) {
+                wlr_scene_node_set_position(
+                    &toplevel->corner_bl_resize_grip_line_left->node,
+                    -ADE_LEFT_RESIZE_GRIP_W,
+                    h
+                );
+                wlr_scene_node_raise_to_top(&toplevel->corner_bl_resize_grip_line_left->node);
             }
         }
     }
