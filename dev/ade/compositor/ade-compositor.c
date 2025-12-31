@@ -66,10 +66,10 @@
 
 #include "desktop_icons.h"
 
-#define ADE_TAB_HEIGHT 25
-#define ADE_TAB_GAP_ABOVE_FRAME 6
+#define ADE_TAB_HEIGHT 27
+#define ADE_TAB_GAP_ABOVE_FRAME 0
 // Tab bottom is 6px above the top border (border is 1px)
-#define ADE_TAB_Y (-(ADE_TAB_HEIGHT + ADE_TAB_GAP_ABOVE_FRAME + 1))
+#define ADE_TAB_Y (-(ADE_TAB_HEIGHT + ADE_TAB_GAP_ABOVE_FRAME + 0))
 #define ADE_LEFT_RESIZE_GRIP_W 6
 
 #define ADE_TOP_RESIZE_GRIP_H 6
