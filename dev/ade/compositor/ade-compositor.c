@@ -2,6 +2,7 @@
  *
  *
  * left: 139, 240, 217, 196, 139
+ * yellow tab: top: (254, 236, 166 ) bot( 254 , 194  , 7)
  */
 // Feature-test macros (must be defined before any system headers)
 #ifndef _POSIX_C_SOURCE
@@ -234,7 +235,16 @@ struct tinywl_toplevel {
     struct wlr_scene_rect *bottom_resize_grip;
     struct wlr_scene_rect *bottom_resize_grip_line_top;
     struct wlr_scene_rect *bottom_resize_grip_line_bottom;
+    
+   
 
+    // Bottom-right corner resize grip (6x6 outside the window)
+    struct wlr_scene_rect *corner_rl_resize_grip; //
+    // Grey detail line at bottom of the corner resize grip
+    struct wlr_scene_rect *corner_rl_resize_grip_line_bottom;
+    // Grey detail line at right edge of the corner resize grip
+    struct wlr_scene_rect *corner_rl_resize_grip_line_right;
+    
     struct wl_listener map;
     struct wl_listener unmap;
     struct wl_listener commit;
@@ -2084,6 +2094,18 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
         }
     }
     
+    // Bottom-right corner resize grip: click-drag to resize right + bottom
+    if (clicked_toplevel != NULL && event->button == BTN_LEFT) {
+        if (clicked_toplevel->corner_rl_resize_grip != NULL &&
+            node == &clicked_toplevel->corner_rl_resize_grip->node) {
+            begin_interactive(clicked_toplevel, TINYWL_CURSOR_RESIZE,
+                WLR_EDGE_RIGHT | WLR_EDGE_BOTTOM);
+            return;
+        }
+    }
+    
+    
+    
 
     if (clicked_toplevel != NULL && event->button == BTN_LEFT) {
         // Close button: click to request the client close.
@@ -2633,6 +2655,41 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
         wlr_scene_node_raise_to_top(&toplevel->bottom_resize_grip_line_bottom->node);
     }
     
+    if (toplevel->corner_rl_resize_grip) {
+        wlr_scene_rect_set_size(toplevel->corner_rl_resize_grip,
+            ADE_LEFT_RESIZE_GRIP_W, ADE_TOP_RESIZE_GRIP_H);
+        wlr_scene_node_set_position(&toplevel->corner_rl_resize_grip->node, w, h);
+        wlr_scene_node_raise_to_top(&toplevel->corner_rl_resize_grip->node);
+    }
+    
+    if (toplevel->corner_rl_resize_grip_line_bottom) {
+        wlr_scene_rect_set_size(
+            toplevel->corner_rl_resize_grip_line_bottom,
+            ADE_LEFT_RESIZE_GRIP_W,
+            1
+        );
+        wlr_scene_node_set_position(
+            &toplevel->corner_rl_resize_grip_line_bottom->node,
+            w,
+            h + (ADE_TOP_RESIZE_GRIP_H - 1)
+        );
+        wlr_scene_node_raise_to_top(&toplevel->corner_rl_resize_grip_line_bottom->node);
+    }
+    
+    if (toplevel->corner_rl_resize_grip_line_right) {
+        wlr_scene_rect_set_size(
+            toplevel->corner_rl_resize_grip_line_right,
+            1,
+            ADE_TOP_RESIZE_GRIP_H
+        );
+        wlr_scene_node_set_position(
+            &toplevel->corner_rl_resize_grip_line_right->node,
+            w + (ADE_LEFT_RESIZE_GRIP_W - 1),
+            h
+        );
+        wlr_scene_node_raise_to_top(&toplevel->corner_rl_resize_grip_line_right->node);
+    }
+    
 
     if (toplevel->xdg_toplevel->base->initial_commit) {
         /* When an xdg_surface performs an initial commit, the compositor must
@@ -2687,6 +2744,13 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
     if (toplevel->bottom_resize_grip_line_top) wlr_scene_node_destroy(&toplevel->bottom_resize_grip_line_top->node);
     if (toplevel->bottom_resize_grip_line_bottom) wlr_scene_node_destroy(&toplevel->bottom_resize_grip_line_bottom->node);
     
+    if (toplevel->corner_rl_resize_grip) wlr_scene_node_destroy(&toplevel->corner_rl_resize_grip->node);
+    
+    if (toplevel->corner_rl_resize_grip_line_bottom)
+        wlr_scene_node_destroy(&toplevel->corner_rl_resize_grip_line_bottom->node);
+    
+    if (toplevel->corner_rl_resize_grip_line_right)
+        wlr_scene_node_destroy(&toplevel->corner_rl_resize_grip_line_right->node);
     
     wl_list_remove(&toplevel->map.link);
     
@@ -2943,6 +3007,52 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
         }
     }
     
+    // Bottom-right corner resize grip (6x6) outside the window (at x=w, y=h)
+    {
+        float corner_col[4] = { 0.92f, 0.92f, 0.92f, 0.28f };
+        toplevel->corner_rl_resize_grip = wlr_scene_rect_create(
+            toplevel->decor_tree,
+            ADE_LEFT_RESIZE_GRIP_W,
+            ADE_TOP_RESIZE_GRIP_H,
+            corner_col
+        );
+        if (toplevel->corner_rl_resize_grip) {
+            wlr_scene_node_set_position(&toplevel->corner_rl_resize_grip->node, w, h);
+            wlr_scene_node_raise_to_top(&toplevel->corner_rl_resize_grip->node);
+        }
+    }
+    
+    // Grey bottom detail line for corner resize grip
+    {
+        const float line_col_corner[4] = { 0.54f, 0.54f, 0.54f, 1.0f };
+        toplevel->corner_rl_resize_grip_line_bottom = wlr_scene_rect_create(
+            toplevel->decor_tree, ADE_LEFT_RESIZE_GRIP_W, 1, line_col_corner);
+        if (toplevel->corner_rl_resize_grip_line_bottom) {
+            wlr_scene_node_set_position(
+                &toplevel->corner_rl_resize_grip_line_bottom->node,
+                w,
+                h + (ADE_TOP_RESIZE_GRIP_H - 1)
+            );
+            wlr_scene_node_raise_to_top(&toplevel->corner_rl_resize_grip_line_bottom->node);
+        }
+    }
+    
+    // Grey right detail line for corner resize grip
+    {
+        const float line_col_corner_r[4] = { 0.54f, 0.54f, 0.54f, 1.0f };
+        toplevel->corner_rl_resize_grip_line_right = wlr_scene_rect_create(
+            toplevel->decor_tree, 1, ADE_TOP_RESIZE_GRIP_H, line_col_corner_r);
+        if (toplevel->corner_rl_resize_grip_line_right) {
+            // Right edge of the 6x6 grip
+            wlr_scene_node_set_position(
+                &toplevel->corner_rl_resize_grip_line_right->node,
+                w + (ADE_LEFT_RESIZE_GRIP_W - 1),
+                h
+            );
+            wlr_scene_node_raise_to_top(&toplevel->corner_rl_resize_grip_line_right->node);
+        }
+    }
+    
     
     /* Tab container (movable along the top edge) */
     toplevel->tab_tree = wlr_scene_tree_create(toplevel->decor_tree);
@@ -2954,7 +3064,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     
     /* BeOS-style yellow tab (rect is inside tab_tree so it moves with it) */
     // Start unfocused tabs as light grey; focus_toplevel() will turn the active one yellow
-    float yellow[4] = { 0.85f, 0.85f, 0.85f, 1.0f };
+    //float yellow[4] = { 0.85f, 0.85f, 0.85f, 1.0f };
     float tab_hit[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // transparent
 
     toplevel->tab_rect = wlr_scene_rect_create(
