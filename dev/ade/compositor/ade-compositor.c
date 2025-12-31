@@ -194,6 +194,7 @@ struct tinywl_toplevel {
     struct wlr_scene_tree *decor_tree;
     struct wlr_scene_tree *tab_tree;      // container for the whole tab (rect + text + close)
     struct wlr_scene_rect *tab_rect;
+    struct wlr_scene_tree *tab_grad_tree;
     // Subtle vertical detail lines on the left/right edges of the tab
     struct wlr_scene_rect *tab_line_left;
     struct wlr_scene_rect *tab_line_right;
@@ -763,6 +764,47 @@ static void ade_tab_clear_expand(struct tinywl_toplevel *toplevel) {
 }
 
 
+static void ade_tab_clear_gradient(struct tinywl_toplevel *toplevel) {
+    if (toplevel && toplevel->tab_grad_tree) {
+        wlr_scene_node_destroy(&toplevel->tab_grad_tree->node);
+        toplevel->tab_grad_tree = NULL;
+    }
+}
+
+static void ade_tab_build_gradient(struct tinywl_toplevel *toplevel, int tab_width) {
+    if (!toplevel || !toplevel->tab_tree) return;
+
+    ade_tab_clear_gradient(toplevel);
+
+    if (tab_width < 1) tab_width = 1;
+
+    toplevel->tab_grad_tree = wlr_scene_tree_create(toplevel->tab_tree);
+    if (!toplevel->tab_grad_tree) return;
+
+    // Top:    RGB(254,236,166)
+    // Bottom: RGB(254,194,7)
+    const float top_col[3]    = { 254.0f/255.0f, 236.0f/255.0f, 166.0f/255.0f };
+    const float bottom_col[3] = { 254.0f/255.0f, 194.0f/255.0f,   7.0f/255.0f };
+
+    for (int y = 0; y < ADE_TAB_HEIGHT; y++) {
+        float t = (ADE_TAB_HEIGHT <= 1) ? 0.0f : (float)y / (float)(ADE_TAB_HEIGHT - 1);
+        float col[4] = {
+            top_col[0]    * (1.0f - t) + bottom_col[0] * t,
+            top_col[1]    * (1.0f - t) + bottom_col[1] * t,
+            top_col[2]    * (1.0f - t) + bottom_col[2] * t,
+            1.0f
+        };
+        struct wlr_scene_rect *row =
+            wlr_scene_rect_create(toplevel->tab_grad_tree, tab_width, 1, col);
+        if (row) wlr_scene_node_set_position(&row->node, 0, y);
+    }
+
+    // Keep gradient behind everything else in tab_tree
+    wlr_scene_node_lower_to_bottom(&toplevel->tab_grad_tree->node);
+}
+
+
+
 static void ade_tab_build_close(struct tinywl_toplevel *toplevel, int tab_width) {
     if (toplevel == NULL || toplevel->tab_tree == NULL) {
         return;
@@ -887,6 +929,10 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
     if (toplevel->tab_rect != NULL) {
         wlr_scene_rect_set_size(toplevel->tab_rect, desired_w, ADE_TAB_HEIGHT); // tab height?
     }
+    // If selected (gradient active), rebuild gradient to match new width
+    if (toplevel->tab_grad_tree != NULL) {
+        ade_tab_build_gradient(toplevel, desired_w);
+    }
     
     // Keep tab edge detail lines aligned with the current tab size
     if (toplevel->tab_line_left) {
@@ -930,15 +976,30 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
 
 // Set tab background color based on focus/selection state
 static void ade_set_tab_selected(struct tinywl_toplevel *toplevel, bool selected) {
-    if (toplevel == NULL || toplevel->tab_rect == NULL) {
-        return;
-    }
+    if (toplevel == NULL || toplevel->tab_rect == NULL) return;
 
-    // Classic BeOS-ish colors: focused = yellow, unfocused = light grey
-    static const float col_selected[4]   = { 1.0f, 0.85f, 0.20f, 1.0f };
     static const float col_unselected[4] = { 0.85f, 0.85f, 0.85f, 1.0f };
 
-    wlr_scene_rect_set_color(toplevel->tab_rect, selected ? col_selected : col_unselected);
+    if (selected) {
+        // Selected: gradient + transparent tab_rect
+        const float transparent[4] = { 0, 0, 0, 0 };
+        wlr_scene_rect_set_color(toplevel->tab_rect, transparent);
+
+        int w = (toplevel->tab_width_px > 0) ? toplevel->tab_width_px : 160;
+        ade_tab_build_gradient(toplevel, w);
+
+        // Ensure content stays on top
+        if (toplevel->tab_line_left)  wlr_scene_node_raise_to_top(&toplevel->tab_line_left->node);
+        if (toplevel->tab_line_right) wlr_scene_node_raise_to_top(&toplevel->tab_line_right->node);
+        if (toplevel->tab_line_top)   wlr_scene_node_raise_to_top(&toplevel->tab_line_top->node);
+        if (toplevel->tab_text_tree)  wlr_scene_node_raise_to_top(&toplevel->tab_text_tree->node);
+        if (toplevel->close_tree)     wlr_scene_node_raise_to_top(&toplevel->close_tree->node);
+        if (toplevel->expand_tree)    wlr_scene_node_raise_to_top(&toplevel->expand_tree->node);
+    } else {
+        // Unselected: solid grey, no gradient
+        ade_tab_clear_gradient(toplevel);
+        wlr_scene_rect_set_color(toplevel->tab_rect, col_unselected);
+    }
 }
 
 
@@ -1426,7 +1487,7 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
             int tab_w = (toplevel->tab_width_px > 0) ? toplevel->tab_width_px : 160;
 
             int min_x = -ADE_LEFT_RESIZE_GRIP_W;
-            int max_x = win_w - tab_w;
+            int max_x = win_w - tab_w + ADE_LEFT_RESIZE_GRIP_W;
             if (max_x < min_x) max_x = min_x;
 
             if (desired_x < min_x) desired_x = min_x;
@@ -2589,6 +2650,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
     ade_tab_clear_text(toplevel);
     ade_tab_clear_close(toplevel);
     ade_tab_clear_expand(toplevel);
+    ade_tab_clear_gradient(toplevel);
     
     if (toplevel->tab_line_left) {
         wlr_scene_node_destroy(&toplevel->tab_line_left->node);
@@ -2893,12 +2955,13 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     /* BeOS-style yellow tab (rect is inside tab_tree so it moves with it) */
     // Start unfocused tabs as light grey; focus_toplevel() will turn the active one yellow
     float yellow[4] = { 0.85f, 0.85f, 0.85f, 1.0f };
+    float tab_hit[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // transparent
 
     toplevel->tab_rect = wlr_scene_rect_create(
         toplevel->tab_tree,
         160,   // tab width
         ADE_TAB_HEIGHT,    // tab height
-        yellow
+                                               tab_hit
     );
 
     /* tab_rect at (0,0) inside tab_tree */
