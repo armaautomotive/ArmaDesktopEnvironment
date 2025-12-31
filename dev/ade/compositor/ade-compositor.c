@@ -66,8 +66,8 @@
 
 #include "desktop_icons.h"
 
-#define ADE_TAB_HEIGHT 27
-#define ADE_TAB_GAP_ABOVE_FRAME 0
+#define ADE_TAB_HEIGHT 26
+#define ADE_TAB_GAP_ABOVE_FRAME 5
 // Tab bottom is 6px above the top border (border is 1px)
 #define ADE_TAB_Y (-(ADE_TAB_HEIGHT + ADE_TAB_GAP_ABOVE_FRAME + 0))
 #define ADE_LEFT_RESIZE_GRIP_W 6
@@ -192,6 +192,10 @@ struct tinywl_toplevel {
     struct wlr_scene_tree *decor_tree;
     struct wlr_scene_tree *tab_tree;      // container for the whole tab (rect + text + close)
     struct wlr_scene_rect *tab_rect;
+    // Subtle vertical detail lines on the left/right edges of the tab
+    struct wlr_scene_rect *tab_line_left;
+    struct wlr_scene_rect *tab_line_right;
+    struct wlr_scene_rect *tab_line_top;
     struct wlr_scene_tree *tab_text_tree; // children are tiny rects forming bitmap text
     int tab_width_px;                     // current tab width (for clamping)
     int tab_x_px;                         // current tab X offset (sliding along top)
@@ -879,7 +883,24 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
 
     // Apply tab width
     if (toplevel->tab_rect != NULL) {
-        wlr_scene_rect_set_size(toplevel->tab_rect, desired_w, 22);
+        wlr_scene_rect_set_size(toplevel->tab_rect, desired_w, ADE_TAB_HEIGHT); // tab height?
+    }
+    
+    // Keep tab edge detail lines aligned with the current tab size
+    if (toplevel->tab_line_left) {
+        wlr_scene_rect_set_size(toplevel->tab_line_left, 1, ADE_TAB_HEIGHT);
+        wlr_scene_node_set_position(&toplevel->tab_line_left->node, 0, 0);
+        wlr_scene_node_raise_to_top(&toplevel->tab_line_left->node);
+    }
+    if (toplevel->tab_line_right) {
+        wlr_scene_rect_set_size(toplevel->tab_line_right, 1, ADE_TAB_HEIGHT);
+        wlr_scene_node_set_position(&toplevel->tab_line_right->node, desired_w - 1, 0);
+        wlr_scene_node_raise_to_top(&toplevel->tab_line_right->node);
+    }
+    if (toplevel->tab_line_top) {
+        wlr_scene_rect_set_size(toplevel->tab_line_top, desired_w, 1);
+        wlr_scene_node_set_position(&toplevel->tab_line_top->node, 0, 0);
+        wlr_scene_node_raise_to_top(&toplevel->tab_line_top->node);
     }
 
     // Build/rebuild close button for this tab width
@@ -2510,6 +2531,11 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
         wlr_scene_node_set_position(&toplevel->top_resize_grip_line_bottom->node, 0, -1);
         wlr_scene_node_raise_to_top(&toplevel->top_resize_grip_line_bottom->node);
     }
+
+    // Keep the yellow tab above the top resize grip visuals
+    if (toplevel->tab_tree) {
+        wlr_scene_node_raise_to_top(&toplevel->tab_tree->node);
+    }
     
     if (toplevel->right_resize_grip) {
         wlr_scene_rect_set_size(toplevel->right_resize_grip, ADE_LEFT_RESIZE_GRIP_W, h);
@@ -2561,6 +2587,19 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
     ade_tab_clear_text(toplevel);
     ade_tab_clear_close(toplevel);
     ade_tab_clear_expand(toplevel);
+    
+    if (toplevel->tab_line_left) {
+        wlr_scene_node_destroy(&toplevel->tab_line_left->node);
+        toplevel->tab_line_left = NULL;
+    }
+    if (toplevel->tab_line_right) {
+        wlr_scene_node_destroy(&toplevel->tab_line_right->node);
+        toplevel->tab_line_right = NULL;
+    }
+    if (toplevel->tab_line_top) {
+        wlr_scene_node_destroy(&toplevel->tab_line_top->node);
+        toplevel->tab_line_top = NULL;
+    }
 
     // Destroy window border nodes
     if (toplevel->border_top) wlr_scene_node_destroy(&toplevel->border_top->node);
@@ -2575,6 +2614,14 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
     if (toplevel->top_resize_grip) wlr_scene_node_destroy(&toplevel->top_resize_grip->node);
     if (toplevel->top_resize_grip_line_top) wlr_scene_node_destroy(&toplevel->top_resize_grip_line_top->node);
     if (toplevel->top_resize_grip_line_bottom) wlr_scene_node_destroy(&toplevel->top_resize_grip_line_bottom->node);
+
+    if (toplevel->right_resize_grip) wlr_scene_node_destroy(&toplevel->right_resize_grip->node);
+    if (toplevel->right_resize_grip_redline) wlr_scene_node_destroy(&toplevel->right_resize_grip_redline->node);
+    if (toplevel->right_resize_grip_redline2) wlr_scene_node_destroy(&toplevel->right_resize_grip_redline2->node);
+
+    if (toplevel->bottom_resize_grip) wlr_scene_node_destroy(&toplevel->bottom_resize_grip->node);
+    if (toplevel->bottom_resize_grip_line_top) wlr_scene_node_destroy(&toplevel->bottom_resize_grip_line_top->node);
+    if (toplevel->bottom_resize_grip_line_bottom) wlr_scene_node_destroy(&toplevel->bottom_resize_grip_line_bottom->node);
     
     
     wl_list_remove(&toplevel->map.link);
@@ -2839,7 +2886,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     toplevel->tab_x_px = -ADE_LEFT_RESIZE_GRIP_W;
     toplevel->tab_width_px = 180; // default until title render computes
     wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, ADE_TAB_Y);
-
+    wlr_scene_node_raise_to_top(&toplevel->tab_tree->node);
     
     /* BeOS-style yellow tab (rect is inside tab_tree so it moves with it) */
     // Start unfocused tabs as light grey; focus_toplevel() will turn the active one yellow
@@ -2855,6 +2902,31 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     /* tab_rect at (0,0) inside tab_tree */
     wlr_scene_node_set_position(&toplevel->tab_rect->node, 0, 0);
     
+    // Grey vertical detail lines on tab left/right edges
+    {
+        const float tab_line_col[4] = { 0.62f, 0.62f, 0.62f, 1.0f };
+        int tab_w = 160; // matches the initial tab_rect width
+        int tab_h = ADE_TAB_HEIGHT;
+
+        toplevel->tab_line_left = wlr_scene_rect_create(toplevel->tab_tree, 1, tab_h, tab_line_col);
+        if (toplevel->tab_line_left) {
+            wlr_scene_node_set_position(&toplevel->tab_line_left->node, 0, 0);
+            wlr_scene_node_raise_to_top(&toplevel->tab_line_left->node);
+        }
+
+        toplevel->tab_line_right = wlr_scene_rect_create(toplevel->tab_tree, 1, tab_h, tab_line_col);
+        if (toplevel->tab_line_right) {
+            wlr_scene_node_set_position(&toplevel->tab_line_right->node, tab_w - 1, 0);
+            wlr_scene_node_raise_to_top(&toplevel->tab_line_right->node);
+        }
+        
+        // Top edge line across the tab
+        toplevel->tab_line_top = wlr_scene_rect_create(toplevel->tab_tree, tab_w, 1, tab_line_col);
+        if (toplevel->tab_line_top) {
+            wlr_scene_node_set_position(&toplevel->tab_line_top->node, 0, 0);
+            wlr_scene_node_raise_to_top(&toplevel->tab_line_top->node);
+        }
+    }
     
 
     toplevel->tab_text_tree = NULL;
