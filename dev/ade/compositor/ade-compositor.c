@@ -204,7 +204,8 @@ struct tinywl_toplevel {
     // Left-side resize grip (pink, draggable)
     struct wlr_scene_rect *left_resize_grip;
     // Detail line on the grip (thin red vertical line)
-    struct wlr_scene_rect *left_resize_grip_redline;
+    struct wlr_scene_rect *left_resize_grip_redline; // rename red to left_side
+    struct wlr_scene_rect *left_resize_grip_redline2; // rename redline2 to right_side
 
     struct wl_listener map;
     struct wl_listener unmap;
@@ -2429,7 +2430,7 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
     
     
     if (toplevel->left_resize_grip) {
-        wlr_scene_rect_set_size(toplevel->left_resize_grip, ADE_LEFT_RESIZE_GRIP_W, h);
+        wlr_scene_rect_set_size(toplevel->left_resize_grip, ADE_LEFT_RESIZE_GRIP_W, h );
         wlr_scene_node_set_position(&toplevel->left_resize_grip->node, -ADE_LEFT_RESIZE_GRIP_W, 0);
         wlr_scene_node_raise_to_top(&toplevel->left_resize_grip->node);
     }
@@ -2437,6 +2438,12 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
         wlr_scene_rect_set_size(toplevel->left_resize_grip_redline, 1, h);
         wlr_scene_node_set_position(&toplevel->left_resize_grip_redline->node, -ADE_LEFT_RESIZE_GRIP_W, 0);
         wlr_scene_node_raise_to_top(&toplevel->left_resize_grip_redline->node);
+    }
+    if (toplevel->left_resize_grip_redline2) {
+        wlr_scene_rect_set_size(toplevel->left_resize_grip_redline2, 1, h);
+        wlr_scene_node_set_position(&toplevel->left_resize_grip_redline2->node,
+            -ADE_LEFT_RESIZE_GRIP_W + (ADE_LEFT_RESIZE_GRIP_W - 1), 0);
+        wlr_scene_node_raise_to_top(&toplevel->left_resize_grip_redline2->node);
     }
     
 
@@ -2465,6 +2472,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 
     if (toplevel->left_resize_grip) wlr_scene_node_destroy(&toplevel->left_resize_grip->node);
     if (toplevel->left_resize_grip_redline) wlr_scene_node_destroy(&toplevel->left_resize_grip_redline->node);
+    if (toplevel->left_resize_grip_redline2) wlr_scene_node_destroy(&toplevel->left_resize_grip_redline2->node);
     
     wl_list_remove(&toplevel->map.link);
     
@@ -2605,19 +2613,32 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     wlr_scene_node_set_position(&toplevel->border_right->node, w, 0);
     
     
-    // Pink left resize grip (drawn on top of the left border)
+    
+    // Left resize grip region (6px) + subtle vertical lines
+    // NOTE: This region matches the window content height (h)
     float grip_col[4] = { 0.94f, 0.94f, 0.94f, 1.0f };
+    float line_col[4] = { 0.54f, 0.54f, 0.54f, 1.0f };
+
+    // Grip background
     toplevel->left_resize_grip = wlr_scene_rect_create(
         toplevel->decor_tree, ADE_LEFT_RESIZE_GRIP_W, h, grip_col);
     wlr_scene_node_set_position(&toplevel->left_resize_grip->node, -ADE_LEFT_RESIZE_GRIP_W, 0);
     wlr_scene_node_raise_to_top(&toplevel->left_resize_grip->node);
-    
-    // Red detail line on the left edge of the grip
-    float red_col[4] = { 0.54f, 0.54f, 0.54f, 1.0f };
+
+    // Left edge line
     toplevel->left_resize_grip_redline = wlr_scene_rect_create(
-        toplevel->decor_tree, 1, h, red_col);
+        toplevel->decor_tree, 1, h, line_col);
     wlr_scene_node_set_position(&toplevel->left_resize_grip_redline->node, -ADE_LEFT_RESIZE_GRIP_W, 0);
     wlr_scene_node_raise_to_top(&toplevel->left_resize_grip_redline->node);
+
+    // Right edge line (inside the 6px grip: x = -1 when width == 6)
+    toplevel->left_resize_grip_redline2 = wlr_scene_rect_create(
+        toplevel->decor_tree, 1, h, line_col);
+    wlr_scene_node_set_position(&toplevel->left_resize_grip_redline2->node,
+        -ADE_LEFT_RESIZE_GRIP_W + (ADE_LEFT_RESIZE_GRIP_W - 1), 0);
+    wlr_scene_node_raise_to_top(&toplevel->left_resize_grip_redline2->node);
+    
+    
     
 
     /* Tab container (movable along the top edge) */
