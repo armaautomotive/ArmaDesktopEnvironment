@@ -67,6 +67,9 @@
 #include "desktop_icons.h"
 
 #define ADE_TAB_HEIGHT 25
+#define ADE_TAB_GAP_ABOVE_FRAME 6
+// Tab bottom is 6px above the top border (border is 1px)
+#define ADE_TAB_Y (-(ADE_TAB_HEIGHT + ADE_TAB_GAP_ABOVE_FRAME + 1))
 #define ADE_LEFT_RESIZE_GRIP_W 6
 
 /* For brevity's sake, struct members are annotated where they are used. */
@@ -2640,12 +2643,13 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     
     
     
-
+    
     /* Tab container (movable along the top edge) */
     toplevel->tab_tree = wlr_scene_tree_create(toplevel->decor_tree);
-    toplevel->tab_x_px = 0;       // start left
+    // Allow tab to slide over the 6px left resize grip; minimum logical position is -6
+    toplevel->tab_x_px = -ADE_LEFT_RESIZE_GRIP_W;
     toplevel->tab_width_px = 180; // default until title render computes
-    wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, -22);
+    wlr_scene_node_set_position(&toplevel->tab_tree->node, toplevel->tab_x_px, ADE_TAB_Y);
 
     /* BeOS-style yellow tab (rect is inside tab_tree so it moves with it) */
     // Start unfocused tabs as light grey; focus_toplevel() will turn the active one yellow
