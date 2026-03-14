@@ -190,6 +190,10 @@ struct tinywl_server {
     struct wlr_scene_tree *deskbar_tree;
     struct wlr_scene_tree *deskbar_apps_tree;
     struct wlr_scene_rect *deskbar_bg;
+    struct wlr_scene_rect *deskbar_border_top;
+    struct wlr_scene_rect *deskbar_border_right;
+    struct wlr_scene_rect *deskbar_border_bottom;
+    struct wlr_scene_rect *deskbar_border_left;
     int deskbar_app_count;
     int deskbar_width;
     int deskbar_height;
@@ -4569,7 +4573,7 @@ static void ade_deskbar_update_layout(struct tinywl_server *server) {
     server->deskbar_app_count = ade_count_mapped_toplevels(server);
 
     const int margin = 0;
-    const int min_width = 100;
+    const int min_width = 140;
     const int pad = 6;
     const int clock_gap = 8;
     const int slot_gap = 4;
@@ -4679,8 +4683,75 @@ static void ade_deskbar_update_layout(struct tinywl_server *server) {
     wlr_scene_node_set_position(&server->deskbar_tree->node, x, y);
 
     const float bg_col[4] = { 0.86f, 0.86f, 0.86f, 0.92f };
+    const float border_col[4] = { 0.60f, 0.60f, 0.60f, 1.0f };
     wlr_scene_rect_set_size(server->deskbar_bg, server->deskbar_width, server->deskbar_height);
     wlr_scene_rect_set_color(server->deskbar_bg, bg_col);
+
+    bool flush_top = false;
+    bool flush_right = false;
+    bool flush_bottom = false;
+    bool flush_left = false;
+    switch (server->deskbar_anchor) {
+        case ADE_DESKBAR_TOP_LEFT:
+            flush_top = true;
+            flush_left = true;
+            break;
+        case ADE_DESKBAR_TOP_CENTER:
+            flush_top = true;
+            flush_left = true;
+            flush_right = true;
+            break;
+        case ADE_DESKBAR_TOP_RIGHT:
+            flush_top = true;
+            flush_right = true;
+            break;
+        case ADE_DESKBAR_RIGHT_CENTER:
+            flush_right = true;
+            flush_top = true;
+            flush_bottom = true;
+            break;
+        case ADE_DESKBAR_BOTTOM_RIGHT:
+            flush_bottom = true;
+            flush_right = true;
+            break;
+        case ADE_DESKBAR_BOTTOM_CENTER:
+            flush_bottom = true;
+            flush_left = true;
+            flush_right = true;
+            break;
+        case ADE_DESKBAR_BOTTOM_LEFT:
+            flush_bottom = true;
+            flush_left = true;
+            break;
+        case ADE_DESKBAR_LEFT_CENTER:
+            flush_left = true;
+            flush_top = true;
+            flush_bottom = true;
+            break;
+    }
+
+    if (server->deskbar_border_top != NULL) {
+        wlr_scene_rect_set_size(server->deskbar_border_top, server->deskbar_width, flush_top ? 0 : 1);
+        wlr_scene_rect_set_color(server->deskbar_border_top, border_col);
+        wlr_scene_node_set_position(&server->deskbar_border_top->node, 0, 0);
+    }
+    if (server->deskbar_border_right != NULL) {
+        wlr_scene_rect_set_size(server->deskbar_border_right, flush_right ? 0 : 1, server->deskbar_height);
+        wlr_scene_rect_set_color(server->deskbar_border_right, border_col);
+        wlr_scene_node_set_position(&server->deskbar_border_right->node,
+            server->deskbar_width - (flush_right ? 0 : 1), 0);
+    }
+    if (server->deskbar_border_bottom != NULL) {
+        wlr_scene_rect_set_size(server->deskbar_border_bottom, server->deskbar_width, flush_bottom ? 0 : 1);
+        wlr_scene_rect_set_color(server->deskbar_border_bottom, border_col);
+        wlr_scene_node_set_position(&server->deskbar_border_bottom->node, 0,
+            server->deskbar_height - (flush_bottom ? 0 : 1));
+    }
+    if (server->deskbar_border_left != NULL) {
+        wlr_scene_rect_set_size(server->deskbar_border_left, flush_left ? 0 : 1, server->deskbar_height);
+        wlr_scene_rect_set_color(server->deskbar_border_left, border_col);
+        wlr_scene_node_set_position(&server->deskbar_border_left->node, 0, 0);
+    }
 
     ade_deskbar_rebuild_apps(server);
 
@@ -4705,9 +4776,30 @@ static void ade_deskbar_init(struct tinywl_server *server) {
     server->deskbar_tree = wlr_scene_tree_create(&server->scene->tree);
 
     const float bg_col[4] = { 0.86f, 0.86f, 0.86f, 0.92f };
+    const float border_col[4] = { 0.60f, 0.60f, 0.60f, 1.0f };
     server->deskbar_bg = wlr_scene_rect_create(server->deskbar_tree,
         server->deskbar_width, server->deskbar_height, bg_col);
     wlr_scene_node_set_position(&server->deskbar_bg->node, 0, 0);
+    server->deskbar_border_top =
+        wlr_scene_rect_create(server->deskbar_tree, server->deskbar_width, 1, border_col);
+    server->deskbar_border_right =
+        wlr_scene_rect_create(server->deskbar_tree, 1, server->deskbar_height, border_col);
+    server->deskbar_border_bottom =
+        wlr_scene_rect_create(server->deskbar_tree, server->deskbar_width, 1, border_col);
+    server->deskbar_border_left =
+        wlr_scene_rect_create(server->deskbar_tree, 1, server->deskbar_height, border_col);
+    if (server->deskbar_border_top != NULL) {
+        wlr_scene_node_set_position(&server->deskbar_border_top->node, 0, 0);
+    }
+    if (server->deskbar_border_right != NULL) {
+        wlr_scene_node_set_position(&server->deskbar_border_right->node, server->deskbar_width - 1, 0);
+    }
+    if (server->deskbar_border_bottom != NULL) {
+        wlr_scene_node_set_position(&server->deskbar_border_bottom->node, 0, server->deskbar_height - 1);
+    }
+    if (server->deskbar_border_left != NULL) {
+        wlr_scene_node_set_position(&server->deskbar_border_left->node, 0, 0);
+    }
 
     server->deskbar_apps_tree = NULL;
 
