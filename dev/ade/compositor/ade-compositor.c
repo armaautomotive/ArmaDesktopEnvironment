@@ -103,6 +103,8 @@ enum ade_deskbar_anchor {
 
 enum ade_deskbar_menu_action {
     ADE_MENU_APPLICATIONS,
+    ADE_MENU_SETTINGS,
+    ADE_MENU_DESKTOP_BACKGROUND,
     ADE_MENU_DOOM,
     ADE_MENU_TERMINAL,
     ADE_MENU_FILES,
@@ -252,6 +254,8 @@ struct tinywl_server {
     struct ade_desktop_icons desktop_icons_state;
     char desktop_icons_conf_path[512];
     char desktop_icon_positions_path[512];
+    char background_conf_path[512];
+    float background_color[4];
     
     struct ade_desktop_icon *last_clicked_icon;
     struct ade_desktop_icon *hovered_icon;
@@ -471,6 +475,7 @@ static void ade_spawn_shell_with_install_fallback(const char *sh_cmd,
 
 // Forward declarations
 static void ade_update_background(struct tinywl_server *server);
+static void ade_load_background_color(struct tinywl_server *server, const char *path);
 
 // Ensure the xcursor theme is loaded at the output scale.
 // If the cursor theme is only loaded at scale=1 on a HiDPI output,
@@ -892,6 +897,10 @@ static void ade_show_resolution_panel(void) {
     ade_spawn_shell("sh launch_resolution.sh");
 }
 
+static void ade_show_background_panel(void) {
+    ade_spawn_shell("sh launch_background.sh");
+}
+
 struct ade_deskbar_menu_item {
     const char *label;
     enum ade_deskbar_menu_action action;
@@ -941,6 +950,9 @@ static void ade_deskbar_submenu_open(struct tinywl_server *server,
         { "Launcher", ADE_MENU_LAUNCHER },
         { "Screen", ADE_MENU_SCREEN },
     };
+    static const struct ade_deskbar_menu_item settings_items[] = {
+        { "Desktop Background", ADE_MENU_DESKTOP_BACKGROUND },
+    };
     static const struct ade_deskbar_menu_item game_items[] = {
         { "Doom", ADE_MENU_DOOM },
     };
@@ -951,6 +963,10 @@ static void ade_deskbar_submenu_open(struct tinywl_server *server,
         case ADE_MENU_APPLICATIONS:
             items = app_items;
             item_count = (int)(sizeof(app_items) / sizeof(app_items[0]));
+            break;
+        case ADE_MENU_SETTINGS:
+            items = settings_items;
+            item_count = (int)(sizeof(settings_items) / sizeof(settings_items[0]));
             break;
         case ADE_MENU_GAMES:
             items = game_items;
@@ -1045,7 +1061,12 @@ static void ade_deskbar_menu_activate(struct tinywl_server *server,
 
     switch (action) {
         case ADE_MENU_APPLICATIONS:
+        case ADE_MENU_SETTINGS:
+        case ADE_MENU_GAMES:
             ade_deskbar_submenu_open(server, action);
+            break;
+        case ADE_MENU_DESKTOP_BACKGROUND:
+            ade_show_background_panel();
             break;
         case ADE_MENU_DOOM:
             ade_spawn_shell(
@@ -1066,9 +1087,6 @@ static void ade_deskbar_menu_activate(struct tinywl_server *server,
                 "ADE Files",
                 "Unable to open a file manager.",
                 "sudo pacman -S thunar");
-            break;
-        case ADE_MENU_GAMES:
-            ade_deskbar_submenu_open(server, action);
             break;
         case ADE_MENU_LAUNCHER: {
             char *argv[] = { "fuzzel", NULL };
@@ -1099,6 +1117,7 @@ static void ade_deskbar_menu_open(struct tinywl_server *server) {
         enum ade_deskbar_menu_action action;
     } items[] = {
         { "Applications >", ADE_MENU_APPLICATIONS },
+        { "Settings >", ADE_MENU_SETTINGS },
         { "Games >", ADE_MENU_GAMES },
         { "Help", ADE_MENU_HELP },
         { "Quit", ADE_MENU_QUIT },
@@ -4241,8 +4260,19 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
                 if (item_tree != NULL && ade_node_is_or_ancestor(node, &item_tree->node)) {
                     enum ade_deskbar_menu_action action =
                         (enum ade_deskbar_menu_action)(intptr_t)item_tree->node.data;
-                    ade_deskbar_menu_close(server);
-                    ade_deskbar_menu_activate(server, action);
+                    if (action == ADE_MENU_APPLICATIONS ||
+                            action == ADE_MENU_GAMES ||
+                            action == ADE_MENU_SETTINGS) {
+                        if (server->deskbar_submenu_tree != NULL &&
+                                server->deskbar_submenu_parent == action) {
+                            ade_deskbar_submenu_close(server);
+                        } else {
+                            ade_deskbar_menu_activate(server, action);
+                        }
+                    } else {
+                        ade_deskbar_menu_close(server);
+                        ade_deskbar_menu_activate(server, action);
+                    }
                     return;
                 }
             }
@@ -4255,7 +4285,9 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
                 if (item_tree != NULL && ade_node_is_or_ancestor(node, &item_tree->node)) {
                     enum ade_deskbar_menu_action action =
                         (enum ade_deskbar_menu_action)(intptr_t)item_tree->node.data;
-                    if (action == ADE_MENU_APPLICATIONS || action == ADE_MENU_GAMES) {
+                    if (action == ADE_MENU_APPLICATIONS ||
+                            action == ADE_MENU_GAMES ||
+                            action == ADE_MENU_SETTINGS) {
                         if (server->deskbar_submenu_tree != NULL) {
                             if (server->deskbar_submenu_parent == action) {
                                 ade_deskbar_submenu_close(server);
@@ -6720,7 +6752,51 @@ static void ade_update_background(struct tinywl_server *server) {
     if (max_h <= 0) max_h = 1080;
 
     wlr_scene_rect_set_size(server->bg_rect, max_w, max_h);
+    wlr_scene_rect_set_color(server->bg_rect, server->background_color);
     wlr_scene_node_lower_to_bottom(&server->bg_rect->node);
+}
+
+static void ade_load_background_color(struct tinywl_server *server, const char *path) {
+    if (server == NULL) {
+        return;
+    }
+
+    server->background_color[0] = 0.1608f;
+    server->background_color[1] = 0.3137f;
+    server->background_color[2] = 0.5255f;
+    server->background_color[3] = 1.0f;
+
+    if (path == NULL) {
+        return;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        return;
+    }
+
+    char line[128];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *p = ade_trim(line);
+        if (*p == '\0') {
+            continue;
+        }
+
+        if (*p == '#') {
+            p++;
+        }
+
+        unsigned int rgb = 0;
+        if (sscanf(p, "%06x", &rgb) == 1) {
+            server->background_color[0] = ((rgb >> 16) & 0xff) / 255.0f;
+            server->background_color[1] = ((rgb >> 8) & 0xff) / 255.0f;
+            server->background_color[2] = (rgb & 0xff) / 255.0f;
+            server->background_color[3] = 1.0f;
+            break;
+        }
+    }
+
+    fclose(f);
 }
 
 static struct tinywl_toplevel *toplevel_from_xdg_toplevel(struct wlr_xdg_toplevel *xdg_toplevel) {
@@ -7005,9 +7081,10 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // BeOS-like blue desktop background
-    float beos_blue[4] = { 0.1608f, 0.3137f, 0.5255f, 1.0f };
-    server.bg_rect = wlr_scene_rect_create(&server.scene->tree, 1920, 1080, beos_blue);
+    snprintf(server.background_conf_path, sizeof(server.background_conf_path),
+        "%s", "desktop-background.conf");
+    ade_load_background_color(&server, server.background_conf_path);
+    server.bg_rect = wlr_scene_rect_create(&server.scene->tree, 1920, 1080, server.background_color);
     if (server.bg_rect == NULL) {
         wlr_log(WLR_ERROR, "ADE: failed to create background rect");
         wlr_scene_node_destroy(&server.scene->tree.node);

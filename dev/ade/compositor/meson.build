@@ -83,4 +83,11 @@ if gtk3.found()
     dependencies: [gtk3],
     install: false
   )
+
+  executable(
+    'ade-background',
+    ['ade-background.c'],
+    dependencies: [gtk3],
+    install: false
+  )
 endif
