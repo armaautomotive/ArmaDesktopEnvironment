@@ -1,0 +1,34 @@
+
+
+Run in UTM on arc install.
+#setup:
+VM> sudo pacman -S spice-vdagent
+VM> sudo systemctl enable --now spice-vdagentd
+VM> reboot
+VM> systemctl status spice-vdagentd
+
+
+login: arma
+
+VM: /home/arma/start_env.sh
+
+/dev/ade/compositor/launch.sh
+
+
+Quit: 
+Option / Alt Escxape
+
+
+Deploy from mac:
+# may need to update VM ip with: 'ip addr'
+./sync.sh
+
+
+VM:
+./build.sh
+
+
+VM:
+./build.sh
+./launch.sh
+Option Esc to quit

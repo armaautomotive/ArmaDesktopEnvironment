@@ -359,6 +359,48 @@ static void ade_spawn_shell(const char *sh_cmd) {
     }
 }
 
+static void ade_spawn_shell_with_error(const char *sh_cmd,
+        const char *title, const char *message) {
+    if (sh_cmd == NULL || title == NULL || message == NULL) {
+        return;
+    }
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+        "(%s) || ((command -v zenity >/dev/null 2>&1 && exec zenity --error --title='%s' --text='%s') "
+        "|| (command -v kdialog >/dev/null 2>&1 && exec kdialog --error '%s' --title '%s') "
+        "|| (command -v xmessage >/dev/null 2>&1 && exec xmessage -center '%s') "
+        "|| (command -v foot >/dev/null 2>&1 && exec foot -T '%s' --window-size-chars=56x8 -e /bin/sh -lc 'printf \"%%s\\n\\n(Press Enter to close)\\n\" \"%s\"; read _') "
+        "|| (command -v xterm >/dev/null 2>&1 && exec xterm -T '%s' -geometry 56x8 -e /bin/sh -lc 'printf \"%%s\\n\\n(Press Enter to close)\\n\" \"%s\"; read _'))",
+        sh_cmd,
+        title, message,
+        message, title,
+        message,
+        title, message,
+        title, message);
+    ade_spawn_shell(cmd);
+}
+
+static void ade_spawn_shell_with_install_fallback(const char *sh_cmd,
+        const char *title, const char *message, const char *install_cmd) {
+    if (sh_cmd == NULL || title == NULL || message == NULL || install_cmd == NULL) {
+        return;
+    }
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+        "(%s) || ((command -v foot >/dev/null 2>&1 && exec foot -T '%s' --window-size-chars=72x12 -e /bin/sh -lc 'printf \"%%s\\n\\nRun this command to install a file manager:\\n  %%s\\n\\nPress Enter to close.\\n\" \"%s\" \"%s\"; read _') "
+        "|| (command -v xterm >/dev/null 2>&1 && exec xterm -T '%s' -geometry 72x12 -e /bin/sh -lc 'printf \"%%s\\n\\nRun this command to install a file manager:\\n  %%s\\n\\nPress Enter to close.\\n\" \"%s\" \"%s\"; read _') "
+        "|| (command -v zenity >/dev/null 2>&1 && exec zenity --info --title='%s' --text='%s\n\nRun this command:\n%s') "
+        "|| (command -v xmessage >/dev/null 2>&1 && exec xmessage -center '%s\n\nRun this command:\n%s'))",
+        sh_cmd,
+        title, message, install_cmd,
+        title, message, install_cmd,
+        title, message, install_cmd,
+        message, install_cmd);
+    ade_spawn_shell(cmd);
+}
+
 // Forward declarations
 static void ade_update_background(struct tinywl_server *server);
 
@@ -731,8 +773,8 @@ static void ade_show_help(void) {
     // Show key hints in a terminal so the user doesn't need to remember commands.
     // Using foot if available; fallback to xterm if installed.
     const char *cmd =
-        "(command -v foot >/dev/null 2>&1 && exec foot -T ADE-Help -e /bin/sh -lc 'printf \"ADE – Arma Desktop Environment\\n\\nF1   = Terminal\\nF2   = Launcher\\nF9   = Help\\nF10  = Screen\\nF12  = Quit\\nAlt+Esc = Quit\\n\\n(Press Enter to close this help)\\n\"; read _') "
-        "|| (command -v xterm >/dev/null 2>&1 && exec xterm -T ADE-Help -e /bin/sh -lc 'printf \"ADE – Arma Desktop Environment\\n\\nF1   = Terminal\\nF2   = Launcher\\nF9   = Help\\nF10  = Screen\\nF12  = Quit\\nAlt+Esc = Quit\\n\\n(Press Enter to close this help)\\n\"; read _')";
+        "(command -v foot >/dev/null 2>&1 && exec foot -T ADE-Help --window-size-chars=44x11 -e /bin/sh -lc 'printf \"ADE – Arma Desktop Environment\\n\\nF1   = Terminal\\nF2   = Launcher\\nF9   = Help\\nF10  = Screen\\nF12  = Quit\\nAlt+Esc = Quit\\n\\n(Press Enter to close this help)\\n\"; read _') "
+        "|| (command -v xterm >/dev/null 2>&1 && exec xterm -T ADE-Help -geometry 44x11 -e /bin/sh -lc 'printf \"ADE – Arma Desktop Environment\\n\\nF1   = Terminal\\nF2   = Launcher\\nF9   = Help\\nF10  = Screen\\nF12  = Quit\\nAlt+Esc = Quit\\n\\n(Press Enter to close this help)\\n\"; read _')";
     ade_spawn_shell(cmd);
 }
 
@@ -742,6 +784,7 @@ static void ade_show_resolution_panel(void) {
 
 enum ade_deskbar_menu_action {
     ADE_MENU_TERMINAL,
+    ADE_MENU_FILES,
     ADE_MENU_LAUNCHER,
     ADE_MENU_SCREEN,
     ADE_MENU_HELP,
@@ -772,6 +815,18 @@ static void ade_deskbar_menu_activate(struct tinywl_server *server,
         case ADE_MENU_TERMINAL:
             ade_spawn("foot");
             break;
+        case ADE_MENU_FILES:
+            ade_spawn_shell_with_install_fallback(
+                "(command -v thunar >/dev/null 2>&1 && exec thunar) "
+                "|| (command -v nautilus >/dev/null 2>&1 && exec nautilus) "
+                "|| (command -v pcmanfm >/dev/null 2>&1 && exec pcmanfm) "
+                "|| (command -v dolphin >/dev/null 2>&1 && exec dolphin) "
+                "|| (command -v xdg-open >/dev/null 2>&1 && xdg-open \"$HOME\" >/dev/null 2>&1 && exit 0) "
+                "|| false",
+                "ADE Files",
+                "Unable to open a file manager.",
+                "sudo pacman -S thunar");
+            break;
         case ADE_MENU_LAUNCHER: {
             char *argv[] = { "fuzzel", NULL };
             ade_spawn_argv(argv);
@@ -801,6 +856,7 @@ static void ade_deskbar_menu_open(struct tinywl_server *server) {
         enum ade_deskbar_menu_action action;
     } items[] = {
         { "Terminal", ADE_MENU_TERMINAL },
+        { "Files", ADE_MENU_FILES },
         { "Launcher", ADE_MENU_LAUNCHER },
         { "Screen", ADE_MENU_SCREEN },
         { "Help", ADE_MENU_HELP },
@@ -2859,6 +2915,20 @@ static bool ade_contains_nocase(const char *haystack, const char *needle) {
     return false;
 }
 
+static bool ade_streq_nocase(const char *a, const char *b) {
+    if (a == NULL || b == NULL) {
+        return false;
+    }
+    while (*a != '\0' && *b != '\0') {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return false;
+        }
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
 static const char *ade_deskbar_icon_for_app(const char *app_id, const char *title) {
     if (ade_contains_nocase(app_id, "foot") ||
         ade_contains_nocase(app_id, "terminal") ||
@@ -2909,14 +2979,75 @@ static const char *ade_deskbar_icon_for_app(const char *app_id, const char *titl
     return "icons/16x16/categories/applications-other.png";
 }
 
+static const char *ade_deskbar_friendly_name(const char *app_id, const char *title) {
+    if (ade_contains_nocase(app_id, "foot") ||
+        ade_contains_nocase(app_id, "terminal") ||
+        ade_contains_nocase(app_id, "xterm") ||
+        ade_contains_nocase(app_id, "kitty") ||
+        ade_contains_nocase(app_id, "konsole") ||
+        ade_contains_nocase(title, "terminal")) {
+        return "Terminal";
+    }
+    if (ade_contains_nocase(app_id, "thunar") ||
+        ade_contains_nocase(app_id, "nautilus") ||
+        ade_contains_nocase(app_id, "dolphin") ||
+        ade_contains_nocase(app_id, "file") ||
+        ade_contains_nocase(title, "files") ||
+        ade_contains_nocase(title, "disk")) {
+        return "Files";
+    }
+    if (ade_contains_nocase(app_id, "calc") ||
+        ade_contains_nocase(app_id, "galculator") ||
+        ade_contains_nocase(title, "calculator")) {
+        return "Calculator";
+    }
+    if (ade_contains_nocase(app_id, "firefox") ||
+        ade_contains_nocase(app_id, "browser") ||
+        ade_contains_nocase(app_id, "chrom") ||
+        ade_contains_nocase(app_id, "vivaldi") ||
+        ade_contains_nocase(app_id, "falkon") ||
+        ade_contains_nocase(app_id, "epiphany") ||
+        ade_contains_nocase(title, "browser")) {
+        return "Browser";
+    }
+    if (ade_contains_nocase(app_id, "vim") ||
+        ade_contains_nocase(app_id, "nvim") ||
+        ade_contains_nocase(app_id, "geany") ||
+        ade_contains_nocase(app_id, "kate") ||
+        ade_contains_nocase(app_id, "kwrite") ||
+        ade_contains_nocase(title, "vim")) {
+        return "Editor";
+    }
+    if (ade_contains_nocase(app_id, "screen") ||
+        ade_contains_nocase(app_id, "settings") ||
+        ade_contains_nocase(title, "screen")) {
+        return "Screen";
+    }
+    if (ade_contains_nocase(app_id, "help") || ade_contains_nocase(title, "help")) {
+        return "Help";
+    }
+    return NULL;
+}
+
 static void ade_deskbar_label_for_app(struct tinywl_toplevel *toplevel,
         char *out, size_t out_sz) {
     const char *src = NULL;
     if (toplevel != NULL && toplevel->xdg_toplevel != NULL) {
-        if (toplevel->xdg_toplevel->title != NULL && toplevel->xdg_toplevel->title[0] != '\0') {
-            src = toplevel->xdg_toplevel->title;
-        } else if (toplevel->xdg_toplevel->app_id != NULL && toplevel->xdg_toplevel->app_id[0] != '\0') {
-            src = toplevel->xdg_toplevel->app_id;
+        const char *title = toplevel->xdg_toplevel->title;
+        const char *app_id = toplevel->xdg_toplevel->app_id;
+        const char *friendly = ade_deskbar_friendly_name(
+            app_id, title);
+
+        if (title != NULL && title[0] != '\0' &&
+                !ade_streq_nocase(title, app_id) &&
+                !ade_streq_nocase(title, friendly)) {
+            src = title;
+        } else if (friendly != NULL) {
+            src = friendly;
+        } else if (title != NULL && title[0] != '\0') {
+            src = title;
+        } else if (app_id != NULL && app_id[0] != '\0') {
+            src = app_id;
         }
     }
     if (src == NULL) {
@@ -3153,6 +3284,13 @@ static bool ade_deskbar_apps_horizontal(enum ade_deskbar_anchor anchor) {
     return anchor == ADE_DESKBAR_TOP_CENTER || anchor == ADE_DESKBAR_BOTTOM_CENTER;
 }
 
+static bool ade_deskbar_is_corner_anchor(enum ade_deskbar_anchor anchor) {
+    return anchor == ADE_DESKBAR_TOP_LEFT ||
+        anchor == ADE_DESKBAR_TOP_RIGHT ||
+        anchor == ADE_DESKBAR_BOTTOM_LEFT ||
+        anchor == ADE_DESKBAR_BOTTOM_RIGHT;
+}
+
 static enum ade_deskbar_anchor ade_deskbar_anchor_from_position(
         struct tinywl_server *server, double x, double y) {
     int ow = 0, oh = 0;
@@ -3337,6 +3475,9 @@ static void ade_deskbar_rebuild_apps(struct tinywl_server *server) {
                         wlr_scene_buffer_set_dest_size(mock_icon_scene, render_w, render_h);
                         int icon_x = pad;
                         int icon_y = clock_y + (clock_h - render_h) / 2;
+                        if (ade_deskbar_is_corner_anchor(server->deskbar_anchor)) {
+                            icon_y += 1;
+                        }
                         if (icon_y < pad) {
                             icon_y = pad;
                         }
