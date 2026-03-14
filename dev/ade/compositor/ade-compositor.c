@@ -85,6 +85,14 @@ enum tinywl_cursor_mode {
     TINYWL_CURSOR_RESIZE,
     TINYWL_CURSOR_TABDRAG,
     TINYWL_CURSOR_ICONDRAG,
+    TINYWL_CURSOR_DESKBAR_DRAG,
+};
+
+enum ade_deskbar_corner {
+    ADE_DESKBAR_TOP_LEFT,
+    ADE_DESKBAR_TOP_RIGHT,
+    ADE_DESKBAR_BOTTOM_LEFT,
+    ADE_DESKBAR_BOTTOM_RIGHT,
 };
 
 
@@ -159,6 +167,14 @@ struct tinywl_server {
     int deskbar_app_count;
     int deskbar_width;
     int deskbar_height;
+    enum ade_deskbar_corner deskbar_corner;
+    bool deskbar_drag_candidate;
+    bool deskbar_dragging;
+    double deskbar_press_x;
+    double deskbar_press_y;
+    double deskbar_grab_dx;
+    double deskbar_grab_dy;
+    char deskbar_conf_path[512];
     
     struct ade_desktop_icons desktop_icons_state;
     char desktop_icons_conf_path[512];
@@ -1415,6 +1431,12 @@ static void begin_tab_drag(struct tinywl_toplevel *toplevel) {
 
 static void begin_interactive(struct tinywl_toplevel *toplevel,
         enum tinywl_cursor_mode mode, uint32_t edges);
+static void ade_deskbar_update_layout(struct tinywl_server *server);
+static bool ade_get_primary_output_size(struct tinywl_server *server, int *out_w, int *out_h);
+static void ade_deskbar_save_corner(struct tinywl_server *server);
+static bool ade_node_is_deskbar(struct tinywl_server *server, struct wlr_scene_node *node);
+static enum ade_deskbar_corner ade_deskbar_corner_from_position(
+        struct tinywl_server *server, double x, double y);
 
 static void reset_cursor_mode(struct tinywl_server *server) {
     /* Reset the cursor mode to passthrough. */
@@ -1427,6 +1449,8 @@ static void reset_cursor_mode(struct tinywl_server *server) {
     server->icon_dragging = false;
     
     server->last_clicked_icon = NULL;
+    server->deskbar_drag_candidate = false;
+    server->deskbar_dragging = false;
 }
 
 static void process_cursor_move(struct tinywl_server *server) {
@@ -1499,6 +1523,16 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
             server->cursor_mode = TINYWL_CURSOR_ICONDRAG;
         }
     }
+
+    if (server->deskbar_drag_candidate && !server->deskbar_dragging && server->deskbar_tree != NULL) {
+        const double thresh = 5.0;
+        double dx = server->cursor->x - server->deskbar_press_x;
+        double dy = server->cursor->y - server->deskbar_press_y;
+        if (dx * dx + dy * dy >= thresh * thresh) {
+            server->deskbar_dragging = true;
+            server->cursor_mode = TINYWL_CURSOR_DESKBAR_DRAG;
+        }
+    }
     
     /* If the mode is non-passthrough, delegate to those functions. */
     if (server->cursor_mode == TINYWL_CURSOR_MOVE) {
@@ -1536,6 +1570,31 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
             int nx = (int)(server->cursor->x - server->icon_grab_dx);
             int ny = (int)(server->cursor->y - server->icon_grab_dy);
             wlr_scene_node_set_position(server->dragged_icon_node, nx, ny);
+        }
+        return;
+    } else if (server->cursor_mode == TINYWL_CURSOR_DESKBAR_DRAG) {
+        if (server->deskbar_tree != NULL) {
+            int ow = 0, oh = 0;
+            int margin = 8;
+            int nx = (int)(server->cursor->x - server->deskbar_grab_dx);
+            int ny = (int)(server->cursor->y - server->deskbar_grab_dy);
+
+            if (!ade_get_primary_output_size(server, &ow, &oh) || ow <= 0 || oh <= 0) {
+                ow = 1920;
+                oh = 1080;
+            }
+
+            if (nx < margin) nx = margin;
+            if (ny < margin) ny = margin;
+            if (nx > ow - margin - server->deskbar_width) {
+                nx = ow - margin - server->deskbar_width;
+            }
+            if (ny > oh - margin - server->deskbar_height) {
+                ny = oh - margin - server->deskbar_height;
+            }
+
+            wlr_scene_node_set_position(&server->deskbar_tree->node, nx, ny);
+            wlr_scene_node_raise_to_top(&server->deskbar_tree->node);
         }
         return;
     }
@@ -1958,6 +2017,21 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     struct wlr_pointer_button_event *event = data;
     // If you released any buttons, we may exit interactive modes.
     if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+        if (event->button == BTN_LEFT &&
+            (server->cursor_mode == TINYWL_CURSOR_DESKBAR_DRAG || server->deskbar_drag_candidate)) {
+            if (server->deskbar_tree != NULL) {
+                server->deskbar_corner = ade_deskbar_corner_from_position(
+                    server,
+                    server->deskbar_tree->node.x,
+                    server->deskbar_tree->node.y);
+                ade_deskbar_update_layout(server);
+                ade_deskbar_save_corner(server);
+            }
+
+            reset_cursor_mode(server);
+            return;
+        }
+
         // Desktop icon: drop on release; if it was a click (not a drag), allow double-click launch.
         if (event->button == BTN_LEFT &&
             (server->cursor_mode == TINYWL_CURSOR_ICONDRAG || server->icon_drag_candidate)) {
@@ -2072,6 +2146,19 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 
             return; // don't forward to clients
         }
+    }
+
+    if (event->button == BTN_LEFT &&
+        event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
+        node != NULL &&
+        ade_node_is_deskbar(server, node)) {
+        server->deskbar_drag_candidate = true;
+        server->deskbar_dragging = false;
+        server->deskbar_press_x = server->cursor->x;
+        server->deskbar_press_y = server->cursor->y;
+        server->deskbar_grab_dx = server->cursor->x - server->deskbar_tree->node.x;
+        server->deskbar_grab_dy = server->cursor->y - server->deskbar_tree->node.y;
+        return;
     }
     
     
@@ -2244,10 +2331,6 @@ static void output_frame(struct wl_listener *listener, void *data) {
 }
 
 
-// Forward declarations (defined later in the file)
-static void ade_deskbar_init(struct tinywl_server *server);
-static void ade_deskbar_update_layout(struct tinywl_server *server);
-
 static void output_request_state(struct wl_listener *listener, void *data) {
     // Apply the backend-requested output state as-is. For nested/VM backends
     // (Wayland/X11), forcing a transform here can result in an inverted output
@@ -2287,6 +2370,110 @@ static bool ade_get_primary_output_size(struct tinywl_server *server, int *out_w
         }
     }
     return false;
+}
+
+static const char *ade_deskbar_corner_name(enum ade_deskbar_corner corner) {
+    switch (corner) {
+        case ADE_DESKBAR_TOP_LEFT:
+            return "top-left";
+        case ADE_DESKBAR_TOP_RIGHT:
+            return "top-right";
+        case ADE_DESKBAR_BOTTOM_LEFT:
+            return "bottom-left";
+        case ADE_DESKBAR_BOTTOM_RIGHT:
+            return "bottom-right";
+    }
+    return "top-right";
+}
+
+static enum ade_deskbar_corner ade_parse_deskbar_corner(const char *value) {
+    if (value == NULL) {
+        return ADE_DESKBAR_TOP_RIGHT;
+    }
+    if (strcmp(value, "top-left") == 0) {
+        return ADE_DESKBAR_TOP_LEFT;
+    }
+    if (strcmp(value, "top-right") == 0) {
+        return ADE_DESKBAR_TOP_RIGHT;
+    }
+    if (strcmp(value, "bottom-left") == 0) {
+        return ADE_DESKBAR_BOTTOM_LEFT;
+    }
+    if (strcmp(value, "bottom-right") == 0) {
+        return ADE_DESKBAR_BOTTOM_RIGHT;
+    }
+    return ADE_DESKBAR_TOP_RIGHT;
+}
+
+static void ade_deskbar_save_corner(struct tinywl_server *server) {
+    if (server == NULL || server->deskbar_conf_path[0] == '\0') {
+        return;
+    }
+
+    FILE *f = fopen(server->deskbar_conf_path, "w");
+    if (f == NULL) {
+        wlr_log(WLR_ERROR, "ADE: failed to save deskbar config %s: %s",
+            server->deskbar_conf_path, strerror(errno));
+        return;
+    }
+
+    fprintf(f, "corner=%s\n", ade_deskbar_corner_name(server->deskbar_corner));
+    fclose(f);
+}
+
+static void ade_deskbar_load_corner(struct tinywl_server *server) {
+    if (server == NULL || server->deskbar_conf_path[0] == '\0') {
+        return;
+    }
+
+    FILE *f = fopen(server->deskbar_conf_path, "r");
+    if (f == NULL) {
+        return;
+    }
+
+    char line[128];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char value[64];
+        if (sscanf(line, "corner=%63s", value) == 1) {
+            server->deskbar_corner = ade_parse_deskbar_corner(value);
+        }
+    }
+
+    fclose(f);
+}
+
+static bool ade_node_is_deskbar(struct tinywl_server *server, struct wlr_scene_node *node) {
+    if (server == NULL || server->deskbar_tree == NULL || node == NULL) {
+        return false;
+    }
+
+    struct wlr_scene_tree *tree = node->parent;
+    while (tree != NULL) {
+        if (tree == server->deskbar_tree) {
+            return true;
+        }
+        tree = tree->node.parent;
+    }
+
+    return false;
+}
+
+static enum ade_deskbar_corner ade_deskbar_corner_from_position(
+        struct tinywl_server *server, double x, double y) {
+    int ow = 0, oh = 0;
+    if (!ade_get_primary_output_size(server, &ow, &oh) || ow <= 0 || oh <= 0) {
+        return ADE_DESKBAR_TOP_RIGHT;
+    }
+
+    double cx = x + (server->deskbar_width / 2.0);
+    double cy = y + (server->deskbar_height / 2.0);
+    bool left = cx < (ow / 2.0);
+    bool top = cy < (oh / 2.0);
+
+    if (top) {
+        return left ? ADE_DESKBAR_TOP_LEFT : ADE_DESKBAR_TOP_RIGHT;
+    }
+    return left ? ADE_DESKBAR_BOTTOM_LEFT : ADE_DESKBAR_BOTTOM_RIGHT;
 }
 
 
@@ -2382,9 +2569,28 @@ static void ade_deskbar_update_layout(struct tinywl_server *server) {
         server->deskbar_width = ow - margin * 2;
     }
 
-    int x = ow - margin - server->deskbar_width;
+    int x = margin;
     int y = margin;
+    switch (server->deskbar_corner) {
+        case ADE_DESKBAR_TOP_LEFT:
+            x = margin;
+            y = margin;
+            break;
+        case ADE_DESKBAR_TOP_RIGHT:
+            x = ow - margin - server->deskbar_width;
+            y = margin;
+            break;
+        case ADE_DESKBAR_BOTTOM_LEFT:
+            x = margin;
+            y = oh - margin - server->deskbar_height;
+            break;
+        case ADE_DESKBAR_BOTTOM_RIGHT:
+            x = ow - margin - server->deskbar_width;
+            y = oh - margin - server->deskbar_height;
+            break;
+    }
     if (x < margin) x = margin;
+    if (y < margin) y = margin;
 
     wlr_scene_node_set_position(&server->deskbar_tree->node, x, y);
 
@@ -2405,6 +2611,9 @@ static void ade_deskbar_init(struct tinywl_server *server) {
     server->deskbar_height = 24;
     server->deskbar_width = 140;
     server->deskbar_app_count = 0;
+    server->deskbar_corner = ADE_DESKBAR_TOP_RIGHT;
+    snprintf(server->deskbar_conf_path, sizeof(server->deskbar_conf_path), "%s", "deskbar.conf");
+    ade_deskbar_load_corner(server);
 
     server->deskbar_tree = wlr_scene_tree_create(&server->scene->tree);
 
@@ -4115,5 +4324,3 @@ int main(int argc, char *argv[]) {
     
     return 0;
 }
-
-
