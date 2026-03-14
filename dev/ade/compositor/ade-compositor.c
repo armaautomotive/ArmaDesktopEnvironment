@@ -183,6 +183,10 @@ struct tinywl_server {
     char deskbar_conf_path[512];
     char deskbar_clock_text[16];
     int deskbar_clock_minute;
+    struct wlr_scene_node *deskbar_mock_icon_node;
+    struct wlr_scene_tree *deskbar_menu_tree;
+    struct wlr_scene_tree *deskbar_menu_items[8];
+    int deskbar_menu_item_count;
     
     struct ade_desktop_icons desktop_icons_state;
     char desktop_icons_conf_path[512];
@@ -715,6 +719,12 @@ static struct wlr_buffer *ade_make_tab_title_buffer(const char *text,
     return &buf->base;
 }
 
+static bool ade_deskbar_is_full_width_anchor(enum ade_deskbar_anchor anchor);
+static bool ade_deskbar_is_full_height_anchor(enum ade_deskbar_anchor anchor);
+static bool ade_deskbar_apps_horizontal(enum ade_deskbar_anchor anchor);
+static struct tinywl_toplevel *ade_deskbar_toplevel_from_node(
+        struct tinywl_server *server, struct wlr_scene_node *node);
+
 
 
 static void ade_show_help(void) {
@@ -728,6 +738,161 @@ static void ade_show_help(void) {
 
 static void ade_show_resolution_panel(void) {
     ade_spawn_shell("sh launch_resolution.sh");
+}
+
+enum ade_deskbar_menu_action {
+    ADE_MENU_TERMINAL,
+    ADE_MENU_LAUNCHER,
+    ADE_MENU_SCREEN,
+    ADE_MENU_HELP,
+    ADE_MENU_QUIT,
+};
+
+static void ade_deskbar_menu_close(struct tinywl_server *server) {
+    if (server == NULL) {
+        return;
+    }
+    if (server->deskbar_menu_tree != NULL) {
+        wlr_scene_node_destroy(&server->deskbar_menu_tree->node);
+        server->deskbar_menu_tree = NULL;
+    }
+    server->deskbar_menu_item_count = 0;
+    for (int i = 0; i < 8; i++) {
+        server->deskbar_menu_items[i] = NULL;
+    }
+}
+
+static void ade_deskbar_menu_activate(struct tinywl_server *server,
+        enum ade_deskbar_menu_action action) {
+    if (server == NULL) {
+        return;
+    }
+
+    switch (action) {
+        case ADE_MENU_TERMINAL:
+            ade_spawn("foot");
+            break;
+        case ADE_MENU_LAUNCHER: {
+            char *argv[] = { "fuzzel", NULL };
+            ade_spawn_argv(argv);
+            break;
+        }
+        case ADE_MENU_SCREEN:
+            ade_show_resolution_panel();
+            break;
+        case ADE_MENU_HELP:
+            ade_show_help();
+            break;
+        case ADE_MENU_QUIT:
+            wl_display_terminate(server->wl_display);
+            break;
+    }
+}
+
+static void ade_deskbar_menu_open(struct tinywl_server *server) {
+    if (server == NULL || server->deskbar_tree == NULL) {
+        return;
+    }
+
+    ade_deskbar_menu_close(server);
+
+    static const struct {
+        const char *label;
+        enum ade_deskbar_menu_action action;
+    } items[] = {
+        { "Terminal", ADE_MENU_TERMINAL },
+        { "Launcher", ADE_MENU_LAUNCHER },
+        { "Screen", ADE_MENU_SCREEN },
+        { "Help", ADE_MENU_HELP },
+        { "Quit", ADE_MENU_QUIT },
+    };
+
+    const int item_count = (int)(sizeof(items) / sizeof(items[0]));
+    const int menu_w = 134;
+    const int item_h = 22;
+    const int menu_h = item_count * item_h + 2;
+    const int gap = 2;
+
+    int menu_x = 0;
+    int menu_y = server->deskbar_height + gap;
+
+    bool right_side = server->deskbar_anchor == ADE_DESKBAR_TOP_RIGHT ||
+        server->deskbar_anchor == ADE_DESKBAR_BOTTOM_RIGHT ||
+        server->deskbar_anchor == ADE_DESKBAR_RIGHT_CENTER;
+    bool bottom_side = server->deskbar_anchor == ADE_DESKBAR_BOTTOM_LEFT ||
+        server->deskbar_anchor == ADE_DESKBAR_BOTTOM_CENTER ||
+        server->deskbar_anchor == ADE_DESKBAR_BOTTOM_RIGHT;
+
+    if (bottom_side) {
+        menu_y = -menu_h - gap;
+    }
+    if (ade_deskbar_is_full_width_anchor(server->deskbar_anchor)) {
+        menu_x = 6;
+    } else if (right_side) {
+        menu_x = server->deskbar_width - menu_w;
+    }
+
+    server->deskbar_menu_tree = wlr_scene_tree_create(server->deskbar_tree);
+    if (server->deskbar_menu_tree == NULL) {
+        return;
+    }
+    wlr_scene_node_set_position(&server->deskbar_menu_tree->node, menu_x, menu_y);
+
+    const float bg_col[4] = { 0.87f, 0.87f, 0.87f, 0.98f };
+    const float border_col[4] = { 0.58f, 0.58f, 0.58f, 1.0f };
+    struct wlr_scene_rect *bg =
+        wlr_scene_rect_create(server->deskbar_menu_tree, menu_w, menu_h, bg_col);
+    if (bg != NULL) {
+        wlr_scene_node_set_position(&bg->node, 0, 0);
+    }
+    struct wlr_scene_rect *top =
+        wlr_scene_rect_create(server->deskbar_menu_tree, menu_w, 1, border_col);
+    if (top != NULL) wlr_scene_node_set_position(&top->node, 0, 0);
+    struct wlr_scene_rect *bottom =
+        wlr_scene_rect_create(server->deskbar_menu_tree, menu_w, 1, border_col);
+    if (bottom != NULL) wlr_scene_node_set_position(&bottom->node, 0, menu_h - 1);
+    struct wlr_scene_rect *left =
+        wlr_scene_rect_create(server->deskbar_menu_tree, 1, menu_h, border_col);
+    if (left != NULL) wlr_scene_node_set_position(&left->node, 0, 0);
+    struct wlr_scene_rect *right =
+        wlr_scene_rect_create(server->deskbar_menu_tree, 1, menu_h, border_col);
+    if (right != NULL) wlr_scene_node_set_position(&right->node, menu_w - 1, 0);
+
+    server->deskbar_menu_item_count = item_count;
+    for (int i = 0; i < item_count; i++) {
+        struct wlr_scene_tree *item_tree =
+            wlr_scene_tree_create(server->deskbar_menu_tree);
+        server->deskbar_menu_items[i] = item_tree;
+        if (item_tree == NULL) {
+            continue;
+        }
+        wlr_scene_node_set_position(&item_tree->node, 1, 1 + i * item_h);
+
+        const float item_bg[4] = { 0.81f, 0.81f, 0.81f, 1.0f };
+        struct wlr_scene_rect *item_rect =
+            wlr_scene_rect_create(item_tree, menu_w - 2, item_h, item_bg);
+        if (item_rect != NULL) {
+            wlr_scene_node_set_position(&item_rect->node, 0, 0);
+        }
+
+        int text_w = 0, text_h = 0;
+        struct wlr_buffer *label_buf =
+            ade_make_text_buffer(items[i].label, &text_w, &text_h);
+        if (label_buf != NULL) {
+            struct wlr_scene_buffer *label_scene =
+                wlr_scene_buffer_create(item_tree, label_buf);
+            wlr_buffer_drop(label_buf);
+            if (label_scene != NULL) {
+                int text_y = (item_h - text_h) / 2;
+                if (text_y < 0) text_y = 0;
+                wlr_scene_node_set_position(&label_scene->node, 10, text_y);
+            }
+        }
+        item_tree->node.data = (void *)(intptr_t)items[i].action;
+    }
+
+    wlr_scene_node_raise_to_top(&server->deskbar_menu_tree->node);
+    wlr_scene_node_raise_to_top(&server->deskbar_tree->node);
 }
 
 
@@ -1655,6 +1820,9 @@ static enum ade_deskbar_anchor ade_deskbar_anchor_from_position(
         struct tinywl_server *server, double x, double y);
 static enum ade_deskbar_anchor ade_deskbar_anchor_from_cursor(
         struct tinywl_server *server, double cursor_x, double cursor_y);
+static bool ade_deskbar_is_full_width_anchor(enum ade_deskbar_anchor anchor);
+static bool ade_deskbar_is_full_height_anchor(enum ade_deskbar_anchor anchor);
+static bool ade_deskbar_apps_horizontal(enum ade_deskbar_anchor anchor);
 static void ade_relayout_desktop_scene(struct tinywl_server *server);
 static bool ade_update_deskbar_clock(struct tinywl_server *server);
 
@@ -2295,6 +2463,34 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     struct wlr_scene_node *node = wlr_scene_node_at(
         &server->scene->tree.node, server->cursor->x, server->cursor->y, &sx, &sy);
 
+    if (event->button == BTN_LEFT &&
+        event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
+        server->deskbar_menu_tree != NULL) {
+        bool hit_menu = ade_node_is_or_ancestor(node, &server->deskbar_menu_tree->node);
+        bool hit_icon = ade_node_is_or_ancestor(node, server->deskbar_mock_icon_node);
+
+        if (hit_icon) {
+            ade_deskbar_menu_close(server);
+            return;
+        }
+
+        if (hit_menu) {
+            for (int i = 0; i < server->deskbar_menu_item_count; i++) {
+                struct wlr_scene_tree *item_tree = server->deskbar_menu_items[i];
+                if (item_tree != NULL && ade_node_is_or_ancestor(node, &item_tree->node)) {
+                    enum ade_deskbar_menu_action action =
+                        (enum ade_deskbar_menu_action)(intptr_t)item_tree->node.data;
+                    ade_deskbar_menu_close(server);
+                    ade_deskbar_menu_activate(server, action);
+                    return;
+                }
+            }
+            return;
+        }
+
+        ade_deskbar_menu_close(server);
+    }
+
     
     /*
     // Desktop icon handling (arm drag on press)
@@ -2344,6 +2540,30 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     // Desktop icon handling (arm drag on press)
     // IMPORTANT: Only treat nodes as desktop icons if they are within the desktop icon scene tree.
     // Otherwise we may misinterpret window scene nodes (which also use node.data) as icons.
+    if (event->button == BTN_LEFT &&
+        event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
+        node != NULL &&
+        server->deskbar_mock_icon_node != NULL &&
+        ade_node_is_or_ancestor(node, server->deskbar_mock_icon_node)) {
+        if (server->deskbar_menu_tree != NULL) {
+            ade_deskbar_menu_close(server);
+        } else {
+            ade_deskbar_menu_open(server);
+        }
+        return;
+    }
+
+    if (event->button == BTN_LEFT &&
+        event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
+        node != NULL) {
+        struct tinywl_toplevel *deskbar_toplevel =
+            ade_deskbar_toplevel_from_node(server, node);
+        if (deskbar_toplevel != NULL) {
+            focus_toplevel(deskbar_toplevel);
+            return;
+        }
+    }
+
     if (event->button == BTN_LEFT &&
         event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
         node != NULL &&
@@ -2899,6 +3119,28 @@ static bool ade_node_is_deskbar(struct tinywl_server *server, struct wlr_scene_n
     return false;
 }
 
+static struct tinywl_toplevel *ade_deskbar_toplevel_from_node(
+        struct tinywl_server *server, struct wlr_scene_node *node) {
+    if (server == NULL || server->deskbar_apps_tree == NULL || node == NULL) {
+        return NULL;
+    }
+    if (!ade_node_is_or_ancestor(node, &server->deskbar_apps_tree->node)) {
+        return NULL;
+    }
+
+    struct wlr_scene_node *cur = node;
+    while (cur != NULL) {
+        if (cur->data != NULL) {
+            return (struct tinywl_toplevel *)cur->data;
+        }
+        if (cur == &server->deskbar_apps_tree->node) {
+            break;
+        }
+        cur = cur->parent ? &cur->parent->node : NULL;
+    }
+    return NULL;
+}
+
 static bool ade_deskbar_is_full_width_anchor(enum ade_deskbar_anchor anchor) {
     return anchor == ADE_DESKBAR_TOP_CENTER || anchor == ADE_DESKBAR_BOTTOM_CENTER;
 }
@@ -3005,6 +3247,7 @@ static void ade_deskbar_rebuild_apps(struct tinywl_server *server) {
         server->deskbar_apps_tree = NULL;
     }
     server->deskbar_apps_tree = wlr_scene_tree_create(server->deskbar_tree);
+    server->deskbar_mock_icon_node = NULL;
 
     const int pad = 6;
     const int clock_gap = 8;
@@ -3015,7 +3258,6 @@ static void ade_deskbar_rebuild_apps(struct tinywl_server *server) {
     int slot_w = apps_horizontal ? 96 : 108;
     int slot_h = 20;
     const int mock_icon_size = 12;
-    const int time_box_pad_x = 8;
     const int time_box_w = 60;
     const int time_box_h = 20;
 
@@ -3040,6 +3282,7 @@ static void ade_deskbar_rebuild_apps(struct tinywl_server *server) {
                 wlr_scene_buffer_set_dest_size(mock_icon_scene, render_w, render_h);
                 int icon_y = (server->deskbar_height - render_h) / 2;
                 wlr_scene_node_set_position(&mock_icon_scene->node, pad + 2, icon_y);
+                server->deskbar_mock_icon_node = &mock_icon_scene->node;
             }
         }
         apps_start_x = pad + mock_icon_size + clock_gap + 9;
@@ -3098,6 +3341,7 @@ static void ade_deskbar_rebuild_apps(struct tinywl_server *server) {
                             icon_y = pad;
                         }
                         wlr_scene_node_set_position(&mock_icon_scene->node, icon_x, icon_y);
+                        server->deskbar_mock_icon_node = &mock_icon_scene->node;
                     }
                 }
 
@@ -3153,21 +3397,30 @@ static void ade_deskbar_rebuild_apps(struct tinywl_server *server) {
         int x = apps_horizontal ? (base_x + i * (slot_w + slot_gap)) : base_x;
         int y = apps_horizontal ? base_y : (base_y + i * (slot_h + slot_gap));
 
+        struct wlr_scene_tree *item_tree =
+            wlr_scene_tree_create(server->deskbar_apps_tree);
+        if (item_tree == NULL) {
+            i++;
+            continue;
+        }
+        wlr_scene_node_set_position(&item_tree->node, x, y);
+        item_tree->node.data = toplevel;
+
         struct wlr_scene_rect *r =
-            wlr_scene_rect_create(server->deskbar_apps_tree, slot_w, slot_h, slot_bg);
-        wlr_scene_node_set_position(&r->node, x, y);
+            wlr_scene_rect_create(item_tree, slot_w, slot_h, slot_bg);
+        wlr_scene_node_set_position(&r->node, 0, 0);
 
-        struct wlr_scene_rect *bt = wlr_scene_rect_create(server->deskbar_apps_tree, slot_w, 1, slot_border);
-        wlr_scene_node_set_position(&bt->node, x, y);
+        struct wlr_scene_rect *bt = wlr_scene_rect_create(item_tree, slot_w, 1, slot_border);
+        wlr_scene_node_set_position(&bt->node, 0, 0);
 
-        struct wlr_scene_rect *bb = wlr_scene_rect_create(server->deskbar_apps_tree, slot_w, 1, slot_border);
-        wlr_scene_node_set_position(&bb->node, x, y + slot_h - 1);
+        struct wlr_scene_rect *bb = wlr_scene_rect_create(item_tree, slot_w, 1, slot_border);
+        wlr_scene_node_set_position(&bb->node, 0, slot_h - 1);
 
-        struct wlr_scene_rect *bl = wlr_scene_rect_create(server->deskbar_apps_tree, 1, slot_h, slot_border);
-        wlr_scene_node_set_position(&bl->node, x, y);
+        struct wlr_scene_rect *bl = wlr_scene_rect_create(item_tree, 1, slot_h, slot_border);
+        wlr_scene_node_set_position(&bl->node, 0, 0);
 
-        struct wlr_scene_rect *br = wlr_scene_rect_create(server->deskbar_apps_tree, 1, slot_h, slot_border);
-        wlr_scene_node_set_position(&br->node, x + slot_w - 1, y);
+        struct wlr_scene_rect *br = wlr_scene_rect_create(item_tree, 1, slot_h, slot_border);
+        wlr_scene_node_set_position(&br->node, slot_w - 1, 0);
 
         char label[32];
         ade_deskbar_label_for_app(toplevel, label, sizeof(label));
@@ -3178,10 +3431,10 @@ static void ade_deskbar_rebuild_apps(struct tinywl_server *server) {
         struct wlr_buffer *icon_buf = ade_load_png_as_wlr_buffer(icon_path);
         if (icon_buf != NULL) {
             struct wlr_scene_buffer *icon_scene =
-                wlr_scene_buffer_create(server->deskbar_apps_tree, icon_buf);
+                wlr_scene_buffer_create(item_tree, icon_buf);
             wlr_buffer_drop(icon_buf);
             if (icon_scene != NULL) {
-                wlr_scene_node_set_position(&icon_scene->node, x + 2, y + 2);
+                wlr_scene_node_set_position(&icon_scene->node, 2, 2);
             }
         }
 
@@ -3189,13 +3442,13 @@ static void ade_deskbar_rebuild_apps(struct tinywl_server *server) {
         struct wlr_buffer *label_buf = ade_make_text_buffer(label, &text_w, &text_h);
         if (label_buf != NULL) {
             struct wlr_scene_buffer *label_scene =
-                wlr_scene_buffer_create(server->deskbar_apps_tree, label_buf);
+                wlr_scene_buffer_create(item_tree, label_buf);
             wlr_buffer_drop(label_buf);
             if (label_scene != NULL) {
-                int text_x = x + 22;
-                int text_y = y + (slot_h - text_h) / 2;
-                if (text_y < y) {
-                    text_y = y;
+                int text_x = 22;
+                int text_y = (slot_h - text_h) / 2;
+                if (text_y < 0) {
+                    text_y = 0;
                 }
                 wlr_scene_node_set_position(&label_scene->node, text_x, text_y);
             }
@@ -3209,6 +3462,10 @@ static void ade_deskbar_rebuild_apps(struct tinywl_server *server) {
 
 static void ade_deskbar_update_layout(struct tinywl_server *server) {
     if (server == NULL || server->deskbar_tree == NULL || server->deskbar_bg == NULL) return;
+
+    if (server->deskbar_menu_tree != NULL) {
+        ade_deskbar_menu_close(server);
+    }
 
     int ow = 0, oh = 0;
     if (!ade_get_primary_output_size(server, &ow, &oh) || ow <= 0 || oh <= 0) {
