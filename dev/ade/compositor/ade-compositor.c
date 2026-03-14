@@ -101,6 +101,18 @@ enum ade_deskbar_anchor {
     ADE_DESKBAR_LEFT_CENTER,
 };
 
+enum ade_deskbar_menu_action {
+    ADE_MENU_APPLICATIONS,
+    ADE_MENU_DOOM,
+    ADE_MENU_TERMINAL,
+    ADE_MENU_FILES,
+    ADE_MENU_GAMES,
+    ADE_MENU_LAUNCHER,
+    ADE_MENU_SCREEN,
+    ADE_MENU_HELP,
+    ADE_MENU_QUIT,
+};
+
 
 struct tinywl_server {
     struct wl_display *wl_display;
@@ -187,6 +199,10 @@ struct tinywl_server {
     struct wlr_scene_tree *deskbar_menu_tree;
     struct wlr_scene_tree *deskbar_menu_items[8];
     int deskbar_menu_item_count;
+    struct wlr_scene_tree *deskbar_submenu_tree;
+    struct wlr_scene_tree *deskbar_submenu_items[8];
+    int deskbar_submenu_item_count;
+    enum ade_deskbar_menu_action deskbar_submenu_parent;
     
     struct ade_desktop_icons desktop_icons_state;
     char desktop_icons_conf_path[512];
@@ -782,19 +798,31 @@ static void ade_show_resolution_panel(void) {
     ade_spawn_shell("sh launch_resolution.sh");
 }
 
-enum ade_deskbar_menu_action {
-    ADE_MENU_TERMINAL,
-    ADE_MENU_FILES,
-    ADE_MENU_LAUNCHER,
-    ADE_MENU_SCREEN,
-    ADE_MENU_HELP,
-    ADE_MENU_QUIT,
+struct ade_deskbar_menu_item {
+    const char *label;
+    enum ade_deskbar_menu_action action;
 };
+
+static void ade_deskbar_submenu_close(struct tinywl_server *server) {
+    if (server == NULL) {
+        return;
+    }
+    if (server->deskbar_submenu_tree != NULL) {
+        wlr_scene_node_destroy(&server->deskbar_submenu_tree->node);
+        server->deskbar_submenu_tree = NULL;
+    }
+    server->deskbar_submenu_item_count = 0;
+    server->deskbar_submenu_parent = ADE_MENU_QUIT;
+    for (int i = 0; i < 8; i++) {
+        server->deskbar_submenu_items[i] = NULL;
+    }
+}
 
 static void ade_deskbar_menu_close(struct tinywl_server *server) {
     if (server == NULL) {
         return;
     }
+    ade_deskbar_submenu_close(server);
     if (server->deskbar_menu_tree != NULL) {
         wlr_scene_node_destroy(&server->deskbar_menu_tree->node);
         server->deskbar_menu_tree = NULL;
@@ -805,6 +833,116 @@ static void ade_deskbar_menu_close(struct tinywl_server *server) {
     }
 }
 
+static void ade_deskbar_submenu_open(struct tinywl_server *server,
+        enum ade_deskbar_menu_action parent_action) {
+    if (server == NULL || server->deskbar_tree == NULL || server->deskbar_menu_tree == NULL) {
+        return;
+    }
+
+    ade_deskbar_submenu_close(server);
+
+    static const struct ade_deskbar_menu_item app_items[] = {
+        { "Terminal", ADE_MENU_TERMINAL },
+        { "Files", ADE_MENU_FILES },
+        { "Launcher", ADE_MENU_LAUNCHER },
+        { "Screen", ADE_MENU_SCREEN },
+    };
+    static const struct ade_deskbar_menu_item game_items[] = {
+        { "Doom", ADE_MENU_DOOM },
+    };
+
+    const struct ade_deskbar_menu_item *items = NULL;
+    int item_count = 0;
+    switch (parent_action) {
+        case ADE_MENU_APPLICATIONS:
+            items = app_items;
+            item_count = (int)(sizeof(app_items) / sizeof(app_items[0]));
+            break;
+        case ADE_MENU_GAMES:
+            items = game_items;
+            item_count = (int)(sizeof(game_items) / sizeof(game_items[0]));
+            break;
+        default:
+            return;
+    }
+
+    const int menu_w = 134;
+    const int item_h = 22;
+    const int menu_h = item_count * item_h + 2;
+    const int gap = 2;
+
+    int submenu_x = server->deskbar_menu_tree->node.x + menu_w + gap;
+    int submenu_y = server->deskbar_menu_tree->node.y + 1;
+
+    if (server->deskbar_anchor == ADE_DESKBAR_TOP_RIGHT ||
+            server->deskbar_anchor == ADE_DESKBAR_BOTTOM_RIGHT ||
+            server->deskbar_anchor == ADE_DESKBAR_RIGHT_CENTER) {
+        submenu_x = server->deskbar_menu_tree->node.x - menu_w - gap;
+    }
+
+    server->deskbar_submenu_tree = wlr_scene_tree_create(server->deskbar_tree);
+    if (server->deskbar_submenu_tree == NULL) {
+        return;
+    }
+    wlr_scene_node_set_position(&server->deskbar_submenu_tree->node, submenu_x, submenu_y);
+    server->deskbar_submenu_parent = parent_action;
+
+    const float bg_col[4] = { 0.87f, 0.87f, 0.87f, 0.98f };
+    const float border_col[4] = { 0.58f, 0.58f, 0.58f, 1.0f };
+    struct wlr_scene_rect *bg =
+        wlr_scene_rect_create(server->deskbar_submenu_tree, menu_w, menu_h, bg_col);
+    if (bg != NULL) wlr_scene_node_set_position(&bg->node, 0, 0);
+    struct wlr_scene_rect *top =
+        wlr_scene_rect_create(server->deskbar_submenu_tree, menu_w, 1, border_col);
+    if (top != NULL) wlr_scene_node_set_position(&top->node, 0, 0);
+    struct wlr_scene_rect *bottom =
+        wlr_scene_rect_create(server->deskbar_submenu_tree, menu_w, 1, border_col);
+    if (bottom != NULL) wlr_scene_node_set_position(&bottom->node, 0, menu_h - 1);
+    struct wlr_scene_rect *left =
+        wlr_scene_rect_create(server->deskbar_submenu_tree, 1, menu_h, border_col);
+    if (left != NULL) wlr_scene_node_set_position(&left->node, 0, 0);
+    struct wlr_scene_rect *right =
+        wlr_scene_rect_create(server->deskbar_submenu_tree, 1, menu_h, border_col);
+    if (right != NULL) wlr_scene_node_set_position(&right->node, menu_w - 1, 0);
+
+    server->deskbar_submenu_item_count = item_count;
+    for (int i = 0; i < item_count; i++) {
+        struct wlr_scene_tree *item_tree =
+            wlr_scene_tree_create(server->deskbar_submenu_tree);
+        server->deskbar_submenu_items[i] = item_tree;
+        if (item_tree == NULL) {
+            continue;
+        }
+        wlr_scene_node_set_position(&item_tree->node, 1, 1 + i * item_h);
+
+        const float item_bg[4] = { 0.81f, 0.81f, 0.81f, 1.0f };
+        struct wlr_scene_rect *item_rect =
+            wlr_scene_rect_create(item_tree, menu_w - 2, item_h, item_bg);
+        if (item_rect != NULL) {
+            wlr_scene_node_set_position(&item_rect->node, 0, 0);
+        }
+
+        int text_w = 0, text_h = 0;
+        struct wlr_buffer *label_buf =
+            ade_make_text_buffer(items[i].label, &text_w, &text_h);
+        if (label_buf != NULL) {
+            struct wlr_scene_buffer *label_scene =
+                wlr_scene_buffer_create(item_tree, label_buf);
+            wlr_buffer_drop(label_buf);
+            if (label_scene != NULL) {
+                int text_y = (item_h - text_h) / 2;
+                if (text_y < 0) text_y = 0;
+                wlr_scene_node_set_position(&label_scene->node, 10, text_y);
+            }
+        }
+        item_tree->node.data = (void *)(intptr_t)items[i].action;
+    }
+
+    wlr_scene_node_raise_to_top(&server->deskbar_submenu_tree->node);
+    wlr_scene_node_raise_to_top(&server->deskbar_menu_tree->node);
+    wlr_scene_node_raise_to_top(&server->deskbar_tree->node);
+}
+
 static void ade_deskbar_menu_activate(struct tinywl_server *server,
         enum ade_deskbar_menu_action action) {
     if (server == NULL) {
@@ -812,6 +950,14 @@ static void ade_deskbar_menu_activate(struct tinywl_server *server,
     }
 
     switch (action) {
+        case ADE_MENU_APPLICATIONS:
+            ade_deskbar_submenu_open(server, action);
+            break;
+        case ADE_MENU_DOOM:
+            ade_spawn_shell(
+                "(command -v foot >/dev/null 2>&1 && exec foot -T ADE-Doom --window-size-chars=40x8 -e /bin/sh -lc 'printf \"Doom is not configured yet.\\n\\n(Press Enter to close)\\n\"; read _') "
+                "|| (command -v xterm >/dev/null 2>&1 && exec xterm -T ADE-Doom -geometry 40x8 -e /bin/sh -lc 'printf \"Doom is not configured yet.\\n\\n(Press Enter to close)\\n\"; read _'))");
+            break;
         case ADE_MENU_TERMINAL:
             ade_spawn("foot");
             break;
@@ -826,6 +972,9 @@ static void ade_deskbar_menu_activate(struct tinywl_server *server,
                 "ADE Files",
                 "Unable to open a file manager.",
                 "sudo pacman -S thunar");
+            break;
+        case ADE_MENU_GAMES:
+            ade_deskbar_submenu_open(server, action);
             break;
         case ADE_MENU_LAUNCHER: {
             char *argv[] = { "fuzzel", NULL };
@@ -855,10 +1004,8 @@ static void ade_deskbar_menu_open(struct tinywl_server *server) {
         const char *label;
         enum ade_deskbar_menu_action action;
     } items[] = {
-        { "Terminal", ADE_MENU_TERMINAL },
-        { "Files", ADE_MENU_FILES },
-        { "Launcher", ADE_MENU_LAUNCHER },
-        { "Screen", ADE_MENU_SCREEN },
+        { "Applications >", ADE_MENU_APPLICATIONS },
+        { "Games >", ADE_MENU_GAMES },
         { "Help", ADE_MENU_HELP },
         { "Quit", ADE_MENU_QUIT },
     };
@@ -2523,10 +2670,26 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
         event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
         server->deskbar_menu_tree != NULL) {
         bool hit_menu = ade_node_is_or_ancestor(node, &server->deskbar_menu_tree->node);
+        bool hit_submenu = server->deskbar_submenu_tree != NULL &&
+            ade_node_is_or_ancestor(node, &server->deskbar_submenu_tree->node);
         bool hit_icon = ade_node_is_or_ancestor(node, server->deskbar_mock_icon_node);
 
         if (hit_icon) {
             ade_deskbar_menu_close(server);
+            return;
+        }
+
+        if (hit_submenu) {
+            for (int i = 0; i < server->deskbar_submenu_item_count; i++) {
+                struct wlr_scene_tree *item_tree = server->deskbar_submenu_items[i];
+                if (item_tree != NULL && ade_node_is_or_ancestor(node, &item_tree->node)) {
+                    enum ade_deskbar_menu_action action =
+                        (enum ade_deskbar_menu_action)(intptr_t)item_tree->node.data;
+                    ade_deskbar_menu_close(server);
+                    ade_deskbar_menu_activate(server, action);
+                    return;
+                }
+            }
             return;
         }
 
@@ -2536,6 +2699,18 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
                 if (item_tree != NULL && ade_node_is_or_ancestor(node, &item_tree->node)) {
                     enum ade_deskbar_menu_action action =
                         (enum ade_deskbar_menu_action)(intptr_t)item_tree->node.data;
+                    if (action == ADE_MENU_APPLICATIONS || action == ADE_MENU_GAMES) {
+                        if (server->deskbar_submenu_tree != NULL) {
+                            if (server->deskbar_submenu_parent == action) {
+                                ade_deskbar_submenu_close(server);
+                            } else {
+                                ade_deskbar_menu_activate(server, action);
+                            }
+                        } else {
+                            ade_deskbar_menu_activate(server, action);
+                        }
+                        return;
+                    }
                     ade_deskbar_menu_close(server);
                     ade_deskbar_menu_activate(server, action);
                     return;
