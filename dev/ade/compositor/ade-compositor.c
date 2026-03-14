@@ -132,6 +132,13 @@ struct ade_session_entry {
     bool matched;
 };
 
+struct ade_icon_position_entry {
+    char *title;
+    char *command;
+    int x;
+    int y;
+};
+
 
 struct tinywl_server {
     struct wl_display *wl_display;
@@ -244,8 +251,10 @@ struct tinywl_server {
     
     struct ade_desktop_icons desktop_icons_state;
     char desktop_icons_conf_path[512];
+    char desktop_icon_positions_path[512];
     
     struct ade_desktop_icon *last_clicked_icon;
+    struct ade_desktop_icon *hovered_icon;
     
     struct wlr_xdg_decoration_manager_v1 *xdg_decoration_manager;
     struct wl_listener new_xdg_decoration;
@@ -856,6 +865,9 @@ static void ade_free_session_entries(struct ade_session_entry *entries, int coun
 static void ade_load_session_from_json(struct tinywl_server *server, const char *path);
 static void ade_restore_saved_session(struct tinywl_server *server);
 static void ade_save_session_to_json(struct tinywl_server *server);
+static void ade_save_desktop_icon_positions(struct tinywl_server *server);
+static bool ade_load_desktop_icon_position(struct tinywl_server *server,
+        const char *title, const char *command, int *out_x, int *out_y);
 static void ade_request_quit(struct tinywl_server *server);
 static void ade_context_menu_close(struct tinywl_server *server);
 static void ade_context_submenu_close(struct tinywl_server *server);
@@ -2327,6 +2339,10 @@ static bool ade_deskbar_is_full_height_anchor(enum ade_deskbar_anchor anchor);
 static bool ade_deskbar_apps_horizontal(enum ade_deskbar_anchor anchor);
 static void ade_relayout_desktop_scene(struct tinywl_server *server);
 static bool ade_update_deskbar_clock(struct tinywl_server *server);
+static struct ade_desktop_icon *ade_desktop_icon_from_scene_node(struct wlr_scene_node *node);
+static void ade_desktop_icon_set_hover(struct ade_desktop_icon *ic, bool hovered);
+static void ade_update_desktop_icon_hover(struct tinywl_server *server,
+    struct wlr_scene_node *node);
 
 static void reset_cursor_mode(struct tinywl_server *server) {
     /* Reset the cursor mode to passthrough. */
@@ -2423,6 +2439,10 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
             server->cursor_mode = TINYWL_CURSOR_DESKBAR_DRAG;
         }
     }
+
+    if (server->cursor_mode != TINYWL_CURSOR_PASSTHROUGH) {
+        ade_update_desktop_icon_hover(server, NULL);
+    }
     
     /* If the mode is non-passthrough, delegate to those functions. */
     if (server->cursor_mode == TINYWL_CURSOR_MOVE) {
@@ -2493,6 +2513,9 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
     double sx, sy;
     struct wlr_seat *seat = server->seat;
     struct wlr_surface *surface = NULL;
+    struct wlr_scene_node *hover_node =
+        wlr_scene_node_at(&server->scene->tree.node, server->cursor->x, server->cursor->y, &sx, &sy);
+    ade_update_desktop_icon_hover(server, hover_node);
     struct tinywl_toplevel *toplevel = desktop_toplevel_at(server,
             server->cursor->x, server->cursor->y, &surface, &sx, &sy);
     if (!toplevel) {
@@ -3301,6 +3324,217 @@ static void ade_load_session_from_json(struct tinywl_server *server, const char 
     server->session_entry_count = count;
 }
 
+static void ade_free_icon_position_entries(struct ade_icon_position_entry *entries, int count) {
+    if (entries == NULL) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        free(entries[i].title);
+        free(entries[i].command);
+    }
+    free(entries);
+}
+
+static bool ade_json_parse_icon_position_entries(const char **p,
+        struct ade_icon_position_entry **out_entries, int *out_count) {
+    *out_entries = NULL;
+    *out_count = 0;
+    if (!ade_json_consume(p, '[')) {
+        return false;
+    }
+    ade_json_skip_ws(p);
+    if (**p == ']') {
+        (*p)++;
+        return true;
+    }
+
+    int cap = 8;
+    int count = 0;
+    struct ade_icon_position_entry *entries = calloc((size_t)cap, sizeof(*entries));
+    if (entries == NULL) {
+        return false;
+    }
+
+    for (;;) {
+        if (count >= cap) {
+            cap *= 2;
+            struct ade_icon_position_entry *grown =
+                realloc(entries, (size_t)cap * sizeof(*entries));
+            if (grown == NULL) {
+                ade_free_icon_position_entries(entries, count);
+                return false;
+            }
+            entries = grown;
+        }
+
+        struct ade_icon_position_entry *entry = &entries[count];
+        memset(entry, 0, sizeof(*entry));
+        if (!ade_json_consume(p, '{')) {
+            ade_free_icon_position_entries(entries, count);
+            return false;
+        }
+
+        ade_json_skip_ws(p);
+        while (**p != '\0' && **p != '}') {
+            char *key = ade_json_parse_string(p);
+            if (key == NULL || !ade_json_consume(p, ':')) {
+                free(key);
+                ade_free_icon_position_entries(entries, count);
+                return false;
+            }
+            if (strcmp(key, "title") == 0) {
+                entry->title = ade_json_parse_string(p);
+            } else if (strcmp(key, "command") == 0) {
+                entry->command = ade_json_parse_string(p);
+            } else if (strcmp(key, "x") == 0) {
+                if (!ade_json_parse_int_value(p, &entry->x)) {
+                    free(key);
+                    ade_free_icon_position_entries(entries, count);
+                    return false;
+                }
+            } else if (strcmp(key, "y") == 0) {
+                if (!ade_json_parse_int_value(p, &entry->y)) {
+                    free(key);
+                    ade_free_icon_position_entries(entries, count);
+                    return false;
+                }
+            } else if (!ade_json_skip_value(p)) {
+                free(key);
+                ade_free_icon_position_entries(entries, count);
+                return false;
+            }
+            free(key);
+            ade_json_skip_ws(p);
+            if (**p == ',') {
+                (*p)++;
+                ade_json_skip_ws(p);
+            } else {
+                break;
+            }
+        }
+
+        if (!ade_json_consume(p, '}')) {
+            ade_free_icon_position_entries(entries, count);
+            return false;
+        }
+
+        count++;
+        ade_json_skip_ws(p);
+        if (**p == ']') {
+            (*p)++;
+            *out_entries = entries;
+            *out_count = count;
+            return true;
+        }
+        if (**p != ',') {
+            ade_free_icon_position_entries(entries, count);
+            return false;
+        }
+        (*p)++;
+        ade_json_skip_ws(p);
+    }
+}
+
+static bool ade_load_desktop_icon_position(struct tinywl_server *server,
+        const char *title, const char *command, int *out_x, int *out_y) {
+    if (server == NULL || title == NULL || command == NULL ||
+            out_x == NULL || out_y == NULL ||
+            server->desktop_icon_positions_path[0] == '\0') {
+        return false;
+    }
+
+    FILE *f = fopen(server->desktop_icon_positions_path, "r");
+    if (f == NULL) {
+        return false;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+    if (sz < 0 || sz > (long)(1024 * 1024)) {
+        fclose(f);
+        return false;
+    }
+
+    char *buf = calloc((size_t)sz + 1, 1);
+    if (buf == NULL) {
+        fclose(f);
+        return false;
+    }
+    size_t nread = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[nread] = '\0';
+
+    const char *p = buf;
+    struct ade_icon_position_entry *entries = NULL;
+    int count = 0;
+    bool ok = ade_json_parse_icon_position_entries(&p, &entries, &count);
+    free(buf);
+    if (!ok) {
+        ade_free_icon_position_entries(entries, count);
+        return false;
+    }
+
+    bool found = false;
+    for (int i = 0; i < count; i++) {
+        struct ade_icon_position_entry *entry = &entries[i];
+        if (entry->title == NULL || entry->command == NULL) {
+            continue;
+        }
+        if (strcmp(entry->title, title) == 0 && strcmp(entry->command, command) == 0) {
+            *out_x = entry->x;
+            *out_y = entry->y;
+            found = true;
+            break;
+        }
+    }
+
+    ade_free_icon_position_entries(entries, count);
+    return found;
+}
+
+static void ade_save_desktop_icon_positions(struct tinywl_server *server) {
+    if (server == NULL || server->desktop_icon_positions_path[0] == '\0' ||
+            server->desktop_icons == NULL) {
+        return;
+    }
+
+    FILE *f = fopen(server->desktop_icon_positions_path, "w");
+    if (f == NULL) {
+        return;
+    }
+
+    fputs("[\n", f);
+    bool first = true;
+    struct wlr_scene_node *node = NULL;
+    wl_list_for_each(node, &server->desktop_icons->children, link) {
+        struct ade_desktop_icon *ic = ade_desktop_icon_from_scene_node(node);
+        if (ic == NULL || ic->title == NULL || ic->exec_cmd == NULL || ic->node == NULL) {
+            continue;
+        }
+
+        char *title_esc = ade_json_escape_dup(ic->title);
+        char *cmd_esc = ade_json_escape_dup(ic->exec_cmd);
+        if (title_esc == NULL || cmd_esc == NULL) {
+            free(title_esc);
+            free(cmd_esc);
+            continue;
+        }
+
+        if (!first) {
+            fputs(",\n", f);
+        }
+        first = false;
+        fprintf(f,
+            "  {\"title\":\"%s\",\"command\":\"%s\",\"x\":%d,\"y\":%d}",
+            title_esc, cmd_esc, ic->node->x, ic->node->y);
+        free(title_esc);
+        free(cmd_esc);
+    }
+    fputs("\n]\n", f);
+    fclose(f);
+}
+
 static void ade_restore_saved_session(struct tinywl_server *server) {
     if (server == NULL || server->session_entries == NULL || server->session_entry_count <= 0) {
         return;
@@ -3352,6 +3586,7 @@ static void ade_request_quit(struct tinywl_server *server) {
     if (server == NULL) {
         return;
     }
+    ade_save_desktop_icon_positions(server);
     ade_save_session_to_json(server);
     wl_display_terminate(server->wl_display);
 }
@@ -3543,8 +3778,60 @@ static struct ade_desktop_icon *ade_desktop_icon_from_scene_node(struct wlr_scen
 
 static void ade_free_desktop_icon(struct ade_desktop_icon *ic) {
     if (!ic) return;
+    free(ic->id);
+    free(ic->title);
+    free(ic->png_path);
     free(ic->exec_cmd);
     free(ic);
+}
+
+static void ade_desktop_icon_set_hover(struct ade_desktop_icon *ic, bool hovered) {
+    if (ic == NULL) {
+        return;
+    }
+
+    const float visible[4] = { 0.86f, 0.89f, 0.94f, 1.0f };
+    const float hidden[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    const float *col = hovered ? visible : hidden;
+
+    if (ic->hover_top != NULL) {
+        wlr_scene_rect_set_color(ic->hover_top, col);
+    }
+    if (ic->hover_right != NULL) {
+        wlr_scene_rect_set_color(ic->hover_right, col);
+    }
+    if (ic->hover_bottom != NULL) {
+        wlr_scene_rect_set_color(ic->hover_bottom, col);
+    }
+    if (ic->hover_left != NULL) {
+        wlr_scene_rect_set_color(ic->hover_left, col);
+    }
+}
+
+static void ade_update_desktop_icon_hover(struct tinywl_server *server,
+        struct wlr_scene_node *node) {
+    if (server == NULL) {
+        return;
+    }
+
+    struct ade_desktop_icon *hit_icon = NULL;
+    if (node != NULL &&
+            server->desktop_icons != NULL &&
+            ade_node_is_or_ancestor(node, &server->desktop_icons->node)) {
+        hit_icon = ade_desktop_icon_from_scene_node(node);
+    }
+
+    if (server->hovered_icon == hit_icon) {
+        return;
+    }
+
+    if (server->hovered_icon != NULL) {
+        ade_desktop_icon_set_hover(server->hovered_icon, false);
+    }
+    server->hovered_icon = hit_icon;
+    if (server->hovered_icon != NULL) {
+        ade_desktop_icon_set_hover(server->hovered_icon, true);
+    }
 }
 
 static bool ade_is_integer_string(const char *s) {
@@ -3638,7 +3925,20 @@ static void ade_load_desktop_icons_from_conf(struct tinywl_server *server, const
 
         struct ade_desktop_icon *ic = calloc(1, sizeof(*ic));
         if (!ic) continue;
+        ic->title = strdup(label);
+        ic->png_path = strdup(png);
         ic->exec_cmd = strdup(right);
+        if (ic->title == NULL || ic->png_path == NULL || ic->exec_cmd == NULL) {
+            ade_free_desktop_icon(ic);
+            continue;
+        }
+
+        int saved_x = x;
+        int saved_y = y;
+        if (ade_load_desktop_icon_position(server, ic->title, ic->exec_cmd, &saved_x, &saved_y)) {
+            x = saved_x;
+            y = saved_y;
+        }
 
         // Create a per-icon tree so icon + label move together and clicks on label still hit the icon.
         struct wlr_scene_tree *icon_tree = wlr_scene_tree_create(server->desktop_icons);
@@ -3685,6 +3985,9 @@ static void ade_load_desktop_icons_from_conf(struct tinywl_server *server, const
             }
         }
 
+        ic->icon_w = icon_box_w;
+        ic->icon_h = icon_box_h;
+
         // Fallback: placeholder rect
         if (!placed) {
             const float col[4] = { 0.80f, 0.80f, 0.80f, 1.0f };
@@ -3717,6 +4020,7 @@ static void ade_load_desktop_icons_from_conf(struct tinywl_server *server, const
         }
 
         int label_w = 0, label_h = 0;
+        int label_tx = 0;
         struct wlr_buffer *label_render_buf =
             ade_make_text_buffer_rgba(label_buf, 1.0, 1.0, 1.0, 1.0, &label_w, &label_h);
         if (label_render_buf != NULL) {
@@ -3724,10 +4028,56 @@ static void ade_load_desktop_icons_from_conf(struct tinywl_server *server, const
                 wlr_scene_buffer_create(icon_tree, label_render_buf);
             wlr_buffer_drop(label_render_buf);
             if (label_scene != NULL) {
-                int tx = (icon_box_w / 2) - (label_w / 2);
-                if (tx < -8) tx = -8;
-                wlr_scene_node_set_position(&label_scene->node, tx, label_y);
+                label_tx = (icon_box_w / 2) - (label_w / 2);
+                wlr_scene_node_set_position(&label_scene->node, label_tx, label_y);
+                ic->label_node = &label_scene->node;
+                ic->label_w = label_w;
+                ic->label_h = label_h;
             }
+        }
+
+        int content_left = 0;
+        int content_right = icon_box_w;
+        int content_bottom = icon_box_h;
+        if (ic->label_node != NULL && label_w > 0 && label_h > 0) {
+            if (label_tx < content_left) {
+                content_left = label_tx;
+            }
+            if (label_tx + label_w > content_right) {
+                content_right = label_tx + label_w;
+            }
+            if (label_y + label_h > content_bottom) {
+                content_bottom = label_y + label_h;
+            }
+        }
+
+        const int hover_pad_x = 4;
+        const int hover_pad_top = 3;
+        const int hover_pad_bottom = 4;
+        const int hover_x = content_left - hover_pad_x;
+        const int hover_y = -hover_pad_top;
+        const int hover_w = (content_right - content_left) + (hover_pad_x * 2);
+        const int hover_h = content_bottom + hover_pad_top + hover_pad_bottom;
+        const float hover_hidden[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+        struct wlr_scene_tree *hover_tree = wlr_scene_tree_create(icon_tree);
+        if (hover_tree != NULL) {
+            wlr_scene_node_set_position(&hover_tree->node, hover_x, hover_y);
+            ic->select_node = &hover_tree->node;
+            ic->hover_top = wlr_scene_rect_create(hover_tree, hover_w, 1, hover_hidden);
+            ic->hover_right = wlr_scene_rect_create(hover_tree, 1, hover_h, hover_hidden);
+            ic->hover_bottom = wlr_scene_rect_create(hover_tree, hover_w, 1, hover_hidden);
+            ic->hover_left = wlr_scene_rect_create(hover_tree, 1, hover_h, hover_hidden);
+            if (ic->hover_right != NULL) {
+                wlr_scene_node_set_position(&ic->hover_right->node, hover_w - 1, 0);
+            }
+            if (ic->hover_bottom != NULL) {
+                wlr_scene_node_set_position(&ic->hover_bottom->node, 0, hover_h - 1);
+            }
+            if (ic->hover_left != NULL) {
+                wlr_scene_node_set_position(&ic->hover_left->node, 0, 0);
+            }
+            wlr_scene_node_lower_to_bottom(&hover_tree->node);
         }
 
         // keep icons above background
@@ -3767,7 +4117,9 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 
             bool dragged = server->icon_dragging;
 
-            if (!dragged) {
+            if (dragged) {
+                ade_save_desktop_icon_positions(server);
+            } else {
                 const uint32_t dbl_ms = 400;
 
                 if (server->last_icon_click_msec != 0 &&
@@ -6680,7 +7032,11 @@ int main(int argc, char *argv[]) {
     server.desktop_icons = wlr_scene_tree_create(&server.scene->tree);
     
     // Desktop icons are loaded from a repo-local config so rsync can copy it with source.
-    ade_load_desktop_icons_from_conf(&server, "desktop-icons.conf");
+    snprintf(server.desktop_icons_conf_path, sizeof(server.desktop_icons_conf_path),
+        "%s", "desktop-icons.conf");
+    snprintf(server.desktop_icon_positions_path, sizeof(server.desktop_icon_positions_path),
+        "%s", "desktop-icons-state.json");
+    ade_load_desktop_icons_from_conf(&server, server.desktop_icons_conf_path);
     snprintf(server.context_menu_conf_path, sizeof(server.context_menu_conf_path),
         "%s", "context-menu.json");
     ade_load_context_menu_from_json(&server, server.context_menu_conf_path);

@@ -5,6 +5,7 @@
 
 struct tinywl_server;     // forward decl (defined in ade-compositor.c)
 struct wlr_scene_node;    // from wlroots
+struct wlr_scene_rect;    // from wlroots
 
 // One desktop icon loaded from config
 struct ade_desktop_icon {
@@ -21,8 +22,16 @@ struct ade_desktop_icon {
     struct wlr_scene_node *select_node; // blue selection lozenge node (may be NULL)
 
     // Cached label size (used for selection sizing)
+    int icon_w;
+    int icon_h;
     int label_w;
     int label_h;
+
+    // Hover outline scene nodes
+    struct wlr_scene_rect *hover_top;
+    struct wlr_scene_rect *hover_right;
+    struct wlr_scene_rect *hover_bottom;
+    struct wlr_scene_rect *hover_left;
 
     // Selection state
     bool selected;
