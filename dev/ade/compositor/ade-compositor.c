@@ -121,6 +121,17 @@ struct ade_popup_item {
     int child_count;
 };
 
+struct ade_session_entry {
+    char *app_id;
+    char *title;
+    char *command;
+    int x;
+    int y;
+    int width;
+    int height;
+    bool matched;
+};
+
 
 struct tinywl_server {
     struct wl_display *wl_display;
@@ -227,6 +238,9 @@ struct tinywl_server {
     struct ade_popup_item *context_submenu_items;
     int context_submenu_item_count;
     char context_menu_conf_path[512];
+    char session_conf_path[512];
+    struct ade_session_entry *session_entries;
+    int session_entry_count;
     
     struct ade_desktop_icons desktop_icons_state;
     char desktop_icons_conf_path[512];
@@ -258,6 +272,11 @@ struct tinywl_toplevel {
     struct tinywl_server *server;
     struct wlr_xdg_toplevel *xdg_toplevel;
     struct wlr_scene_tree *scene_tree;
+    bool restore_pending;
+    int restore_x;
+    int restore_y;
+    int restore_w;
+    int restore_h;
     
     /* Simple server-side decoration: BeOS-style tab */
     struct wlr_scene_tree *decor_tree;
@@ -826,11 +845,18 @@ static bool ade_deskbar_is_full_height_anchor(enum ade_deskbar_anchor anchor);
 static bool ade_deskbar_apps_horizontal(enum ade_deskbar_anchor anchor);
 static struct tinywl_toplevel *ade_deskbar_toplevel_from_node(
         struct tinywl_server *server, struct wlr_scene_node *node);
+static bool ade_contains_nocase(const char *haystack, const char *needle);
+static bool ade_streq_nocase(const char *a, const char *b);
 static void ade_free_popup_items(struct ade_popup_item *items, int count);
 static bool ade_json_parse_popup_items(const char **p,
         struct ade_popup_item **out_items, int *out_count);
 static void ade_load_default_context_menu(struct tinywl_server *server);
 static void ade_load_context_menu_from_json(struct tinywl_server *server, const char *path);
+static void ade_free_session_entries(struct ade_session_entry *entries, int count);
+static void ade_load_session_from_json(struct tinywl_server *server, const char *path);
+static void ade_restore_saved_session(struct tinywl_server *server);
+static void ade_save_session_to_json(struct tinywl_server *server);
+static void ade_request_quit(struct tinywl_server *server);
 static void ade_context_menu_close(struct tinywl_server *server);
 static void ade_context_submenu_close(struct tinywl_server *server);
 static void ade_context_menu_open(struct tinywl_server *server, double cursor_x, double cursor_y);
@@ -1044,7 +1070,7 @@ static void ade_deskbar_menu_activate(struct tinywl_server *server,
             ade_show_help();
             break;
         case ADE_MENU_QUIT:
-            wl_display_terminate(server->wl_display);
+            ade_request_quit(server);
             break;
     }
 }
@@ -1288,7 +1314,7 @@ static void ade_context_menu_activate_item(struct tinywl_server *server,
     } else if (strcmp(item->action, "help") == 0) {
         ade_show_help();
     } else if (strcmp(item->action, "quit") == 0) {
-        wl_display_terminate(server->wl_display);
+        ade_request_quit(server);
     } else if (strcmp(item->action, "doom") == 0) {
         ade_spawn_shell(
             "(command -v doomretro >/dev/null 2>&1 && exec doomretro) "
@@ -2022,7 +2048,7 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
      */
     switch (sym) {
     case XKB_KEY_Escape:
-        wl_display_terminate(server->wl_display);
+        ade_request_quit(server);
         break;
     case XKB_KEY_F1:
         /* Cycle to the next toplevel */
@@ -2075,7 +2101,7 @@ static void keyboard_handle_key(
         for (int i = 0; i < nsyms; i++) {
             switch (syms[i]) {
             case XKB_KEY_F12: // quit compositor
-                wl_display_terminate(server->wl_display);
+                ade_request_quit(server);
                 handled = true;
                 break;
             case XKB_KEY_F1: // terminal
@@ -2930,6 +2956,404 @@ static void ade_load_context_menu_from_json(struct tinywl_server *server, const 
     ade_free_popup_items(server->context_menu_items, server->context_menu_item_count);
     server->context_menu_items = items;
     server->context_menu_item_count = count;
+}
+
+static void ade_free_session_entries(struct ade_session_entry *entries, int count) {
+    if (entries == NULL) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        free(entries[i].app_id);
+        free(entries[i].title);
+        free(entries[i].command);
+    }
+    free(entries);
+}
+
+static char *ade_json_escape_dup(const char *text) {
+    if (text == NULL) {
+        return strdup("");
+    }
+    size_t len = 0;
+    for (const char *p = text; *p != '\0'; p++) {
+        if (*p == '"' || *p == '\\' || *p == '\n' || *p == '\r' || *p == '\t') {
+            len += 2;
+        } else {
+            len++;
+        }
+    }
+    char *out = calloc(len + 1, 1);
+    if (out == NULL) {
+        return NULL;
+    }
+    size_t oi = 0;
+    for (const char *p = text; *p != '\0'; p++) {
+        switch (*p) {
+            case '"': out[oi++] = '\\'; out[oi++] = '"'; break;
+            case '\\': out[oi++] = '\\'; out[oi++] = '\\'; break;
+            case '\n': out[oi++] = '\\'; out[oi++] = 'n'; break;
+            case '\r': out[oi++] = '\\'; out[oi++] = 'r'; break;
+            case '\t': out[oi++] = '\\'; out[oi++] = 't'; break;
+            default: out[oi++] = *p; break;
+        }
+    }
+    out[oi] = '\0';
+    return out;
+}
+
+static bool ade_session_command_for_toplevel(struct tinywl_toplevel *toplevel,
+        char *out, size_t out_sz) {
+    if (toplevel == NULL || toplevel->xdg_toplevel == NULL || out == NULL || out_sz == 0) {
+        return false;
+    }
+
+    const char *app_id = toplevel->xdg_toplevel->app_id;
+    const char *title = toplevel->xdg_toplevel->title;
+
+    if (ade_contains_nocase(title, "ade-help") || ade_contains_nocase(title, "help")) {
+        snprintf(out, out_sz, "%s", "__ADE_HELP__");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "foot") ||
+            ade_contains_nocase(app_id, "terminal") ||
+            ade_contains_nocase(app_id, "xterm") ||
+            ade_contains_nocase(app_id, "kitty") ||
+            ade_contains_nocase(app_id, "konsole")) {
+        snprintf(out, out_sz, "%s", "foot");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "thunar")) {
+        snprintf(out, out_sz, "%s", "thunar");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "nautilus")) {
+        snprintf(out, out_sz, "%s", "nautilus");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "dolphin")) {
+        snprintf(out, out_sz, "%s", "dolphin");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "pcmanfm")) {
+        snprintf(out, out_sz, "%s", "pcmanfm");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "galculator") || ade_contains_nocase(app_id, "calc")) {
+        snprintf(out, out_sz, "%s", "galculator");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "firefox")) {
+        snprintf(out, out_sz, "%s", "firefox");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "brave")) {
+        snprintf(out, out_sz, "%s", "brave-browser");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "chrom")) {
+        snprintf(out, out_sz, "%s", "chromium");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "thunderbird")) {
+        snprintf(out, out_sz, "%s", "thunderbird");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "evolution")) {
+        snprintf(out, out_sz, "%s", "evolution");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "geary")) {
+        snprintf(out, out_sz, "%s", "geary");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "doom")) {
+        snprintf(out, out_sz, "%s", "doomretro");
+        return true;
+    }
+    if (ade_contains_nocase(app_id, "ade-resolution") || ade_contains_nocase(title, "screen")) {
+        snprintf(out, out_sz, "%s", "__ADE_SCREEN__");
+        return true;
+    }
+    return false;
+}
+
+static void ade_save_session_to_json(struct tinywl_server *server) {
+    if (server == NULL || server->session_conf_path[0] == '\0') {
+        return;
+    }
+
+    FILE *f = fopen(server->session_conf_path, "w");
+    if (f == NULL) {
+        return;
+    }
+
+    fputs("[\n", f);
+    bool first = true;
+    struct tinywl_toplevel *toplevel = NULL;
+    wl_list_for_each(toplevel, &server->toplevels, link) {
+        if (toplevel == NULL || toplevel->xdg_toplevel == NULL ||
+                toplevel->xdg_toplevel->base == NULL) {
+            continue;
+        }
+
+        char command[256];
+        if (!ade_session_command_for_toplevel(toplevel, command, sizeof(command))) {
+            continue;
+        }
+
+        const char *app_id = toplevel->xdg_toplevel->app_id ? toplevel->xdg_toplevel->app_id : "";
+        const char *title = toplevel->xdg_toplevel->title ? toplevel->xdg_toplevel->title : "";
+        struct wlr_box geo = toplevel->xdg_toplevel->base->geometry;
+        char *app_id_esc = ade_json_escape_dup(app_id);
+        char *title_esc = ade_json_escape_dup(title);
+        char *cmd_esc = ade_json_escape_dup(command);
+        if (app_id_esc == NULL || title_esc == NULL || cmd_esc == NULL) {
+            free(app_id_esc);
+            free(title_esc);
+            free(cmd_esc);
+            continue;
+        }
+
+        if (!first) {
+            fputs(",\n", f);
+        }
+        first = false;
+        fprintf(f,
+            "  {\"app_id\":\"%s\",\"title\":\"%s\",\"command\":\"%s\",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d}",
+            app_id_esc, title_esc, cmd_esc,
+            toplevel->scene_tree->node.x, toplevel->scene_tree->node.y,
+            geo.width, geo.height);
+
+        free(app_id_esc);
+        free(title_esc);
+        free(cmd_esc);
+    }
+    fputs("\n]\n", f);
+    fclose(f);
+}
+
+static bool ade_json_parse_int_value(const char **p, int *out) {
+    ade_json_skip_ws(p);
+    if (p == NULL || *p == NULL || **p == '\0') {
+        return false;
+    }
+    char *end = NULL;
+    long value = strtol(*p, &end, 10);
+    if (end == *p) {
+        return false;
+    }
+    *p = end;
+    *out = (int)value;
+    return true;
+}
+
+static bool ade_json_parse_session_entries(const char **p,
+        struct ade_session_entry **out_entries, int *out_count) {
+    *out_entries = NULL;
+    *out_count = 0;
+    if (!ade_json_consume(p, '[')) {
+        return false;
+    }
+    ade_json_skip_ws(p);
+    if (**p == ']') {
+        (*p)++;
+        return true;
+    }
+
+    int cap = 8;
+    int count = 0;
+    struct ade_session_entry *entries = calloc((size_t)cap, sizeof(*entries));
+    if (entries == NULL) {
+        return false;
+    }
+
+    for (;;) {
+        if (count >= cap) {
+            cap *= 2;
+            struct ade_session_entry *grown =
+                realloc(entries, (size_t)cap * sizeof(*entries));
+            if (grown == NULL) {
+                ade_free_session_entries(entries, count);
+                return false;
+            }
+            entries = grown;
+        }
+        struct ade_session_entry *entry = &entries[count];
+        memset(entry, 0, sizeof(*entry));
+        if (!ade_json_consume(p, '{')) {
+            ade_free_session_entries(entries, count);
+            return false;
+        }
+        ade_json_skip_ws(p);
+        while (**p != '\0' && **p != '}') {
+            char *key = ade_json_parse_string(p);
+            if (key == NULL || !ade_json_consume(p, ':')) {
+                free(key);
+                ade_free_session_entries(entries, count);
+                return false;
+            }
+            if (strcmp(key, "app_id") == 0) {
+                entry->app_id = ade_json_parse_string(p);
+            } else if (strcmp(key, "title") == 0) {
+                entry->title = ade_json_parse_string(p);
+            } else if (strcmp(key, "command") == 0) {
+                entry->command = ade_json_parse_string(p);
+            } else if (strcmp(key, "x") == 0) {
+                if (!ade_json_parse_int_value(p, &entry->x)) {
+                    free(key);
+                    ade_free_session_entries(entries, count);
+                    return false;
+                }
+            } else if (strcmp(key, "y") == 0) {
+                if (!ade_json_parse_int_value(p, &entry->y)) {
+                    free(key);
+                    ade_free_session_entries(entries, count);
+                    return false;
+                }
+            } else if (strcmp(key, "width") == 0) {
+                if (!ade_json_parse_int_value(p, &entry->width)) {
+                    free(key);
+                    ade_free_session_entries(entries, count);
+                    return false;
+                }
+            } else if (strcmp(key, "height") == 0) {
+                if (!ade_json_parse_int_value(p, &entry->height)) {
+                    free(key);
+                    ade_free_session_entries(entries, count);
+                    return false;
+                }
+            } else if (!ade_json_skip_value(p)) {
+                free(key);
+                ade_free_session_entries(entries, count);
+                return false;
+            }
+            free(key);
+            ade_json_skip_ws(p);
+            if (**p == ',') {
+                (*p)++;
+                ade_json_skip_ws(p);
+            } else {
+                break;
+            }
+        }
+        if (!ade_json_consume(p, '}')) {
+            ade_free_session_entries(entries, count);
+            return false;
+        }
+        count++;
+        ade_json_skip_ws(p);
+        if (**p == ']') {
+            (*p)++;
+            *out_entries = entries;
+            *out_count = count;
+            return true;
+        }
+        if (**p != ',') {
+            ade_free_session_entries(entries, count);
+            return false;
+        }
+        (*p)++;
+    }
+}
+
+static void ade_load_session_from_json(struct tinywl_server *server, const char *path) {
+    if (server == NULL || path == NULL) {
+        return;
+    }
+    ade_free_session_entries(server->session_entries, server->session_entry_count);
+    server->session_entries = NULL;
+    server->session_entry_count = 0;
+
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        return;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return;
+    }
+    long len = ftell(f);
+    if (len < 0) {
+        fclose(f);
+        return;
+    }
+    rewind(f);
+    char *buf = calloc((size_t)len + 1, 1);
+    if (buf == NULL) {
+        fclose(f);
+        return;
+    }
+    size_t got = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    buf[got] = '\0';
+
+    const char *p = buf;
+    struct ade_session_entry *entries = NULL;
+    int count = 0;
+    bool ok = ade_json_parse_session_entries(&p, &entries, &count);
+    ade_json_skip_ws(&p);
+    free(buf);
+    if (!ok || *p != '\0') {
+        ade_free_session_entries(entries, count);
+        return;
+    }
+    server->session_entries = entries;
+    server->session_entry_count = count;
+}
+
+static void ade_restore_saved_session(struct tinywl_server *server) {
+    if (server == NULL || server->session_entries == NULL || server->session_entry_count <= 0) {
+        return;
+    }
+    for (int i = 0; i < server->session_entry_count; i++) {
+        struct ade_session_entry *entry = &server->session_entries[i];
+        if (entry->command == NULL || entry->command[0] == '\0') {
+            entry->matched = true;
+            continue;
+        }
+        if (strcmp(entry->command, "__ADE_HELP__") == 0) {
+            ade_show_help();
+        } else if (strcmp(entry->command, "__ADE_SCREEN__") == 0) {
+            ade_show_resolution_panel();
+        } else {
+            ade_spawn_shell(entry->command);
+        }
+    }
+}
+
+static struct ade_session_entry *ade_match_session_entry(struct tinywl_toplevel *toplevel) {
+    if (toplevel == NULL || toplevel->server == NULL || toplevel->xdg_toplevel == NULL) {
+        return NULL;
+    }
+    struct tinywl_server *server = toplevel->server;
+    const char *app_id = toplevel->xdg_toplevel->app_id ? toplevel->xdg_toplevel->app_id : "";
+    const char *title = toplevel->xdg_toplevel->title ? toplevel->xdg_toplevel->title : "";
+
+    for (int i = 0; i < server->session_entry_count; i++) {
+        struct ade_session_entry *entry = &server->session_entries[i];
+        if (entry->matched || entry->command == NULL) {
+            continue;
+        }
+        if (entry->app_id != NULL && entry->app_id[0] != '\0' &&
+                ade_streq_nocase(entry->app_id, app_id)) {
+            entry->matched = true;
+            return entry;
+        }
+        if (entry->title != NULL && entry->title[0] != '\0' &&
+                ade_streq_nocase(entry->title, title)) {
+            entry->matched = true;
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+static void ade_request_quit(struct tinywl_server *server) {
+    if (server == NULL) {
+        return;
+    }
+    ade_save_session_to_json(server);
+    wl_display_terminate(server->wl_display);
 }
 
 // -----------------------------------------------------------------------------
@@ -4902,11 +5326,23 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
     struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, map);
 
     wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
+    toplevel->restore_pending = false;
 
     // Center the window on the primary output the first time it maps,
     // and cascade each new window slightly so they don't overlap perfectly.
+    struct ade_session_entry *restore = ade_match_session_entry(toplevel);
     int ow = 0, oh = 0;
-    if (ade_get_primary_output_size(toplevel->server, &ow, &oh)) {
+    if (restore != NULL) {
+        toplevel->restore_pending = true;
+        toplevel->restore_x = restore->x;
+        toplevel->restore_y = restore->y;
+        toplevel->restore_w = restore->width;
+        toplevel->restore_h = restore->height;
+        wlr_scene_node_set_position(&toplevel->scene_tree->node, restore->x, restore->y);
+        if (restore->width > 0 && restore->height > 0) {
+            wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, restore->width, restore->height);
+        }
+    } else if (ade_get_primary_output_size(toplevel->server, &ow, &oh)) {
         // wlroots 0.19 exposes the negotiated xdg-surface geometry directly.
         struct wlr_box geo = toplevel->xdg_toplevel->base->geometry;
         if (geo.width > 0 && geo.height > 0) {
@@ -5002,6 +5438,19 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
     int w = geo.width;
     int h = geo.height;
     const int bw = 1;
+
+    if (toplevel->restore_pending) {
+        if (toplevel->restore_w > 0 && toplevel->restore_h > 0 &&
+                (w != toplevel->restore_w || h != toplevel->restore_h)) {
+            wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
+                toplevel->restore_w, toplevel->restore_h);
+        }
+        wlr_scene_node_set_position(&toplevel->scene_tree->node,
+            toplevel->restore_x, toplevel->restore_y);
+        if (w > 0 && h > 0) {
+            toplevel->restore_pending = false;
+        }
+    }
 
     if (toplevel->border_top) {
         wlr_scene_rect_set_size(toplevel->border_top, w, bw);
@@ -6235,6 +6684,9 @@ int main(int argc, char *argv[]) {
     snprintf(server.context_menu_conf_path, sizeof(server.context_menu_conf_path),
         "%s", "context-menu.json");
     ade_load_context_menu_from_json(&server, server.context_menu_conf_path);
+    snprintf(server.session_conf_path, sizeof(server.session_conf_path),
+        "%s", "session.json");
+    ade_load_session_from_json(&server, server.session_conf_path);
 
     // Icons are config-driven; remove hard-coded icons so double-click behavior
     // always uses the config's exec_cmd.
@@ -6432,8 +6884,12 @@ int main(int argc, char *argv[]) {
      * startup command if requested. */
     setenv("WAYLAND_DISPLAY", socket, true);
 
-    /* Show help on startup so shortcuts are visible */
-    ade_show_help();
+    if (server.session_entry_count > 0) {
+        ade_restore_saved_session(&server);
+    } else {
+        /* Show help on startup so shortcuts are visible */
+        ade_show_help();
+    }
 
     if (startup_cmd) {
         if (fork() == 0) {
@@ -6504,6 +6960,9 @@ int main(int argc, char *argv[]) {
     ade_free_popup_items(server.context_menu_items, server.context_menu_item_count);
     server.context_menu_items = NULL;
     server.context_menu_item_count = 0;
+    ade_free_session_entries(server.session_entries, server.session_entry_count);
+    server.session_entries = NULL;
+    server.session_entry_count = 0;
     
     server.last_clicked_icon = NULL;
     
