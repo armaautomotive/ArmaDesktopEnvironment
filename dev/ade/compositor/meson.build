@@ -12,6 +12,7 @@ xkbcommon = dependency('xkbcommon')
 cairo = dependency('cairo')
 pango = dependency('pango')
 pangocairo = dependency('pangocairo')
+gtk3 = dependency('gtk+-3.0', required: false)
 
 wayland_scanner = find_program('wayland-scanner')
 
@@ -74,3 +75,12 @@ executable(
   c_args: ['-DWLR_USE_UNSTABLE'],
   install: false
 )
+
+if gtk3.found()
+  executable(
+    'ade-resolution',
+    ['ade-resolution.c'],
+    dependencies: [gtk3],
+    install: false
+  )
+endif

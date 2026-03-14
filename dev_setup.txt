@@ -65,5 +65,6 @@ sudo pacman -S --needed wlr-protocols
 
 sudo pacman -S --needed fuzzel
 
+sudo pacman -S --needed gtk3 wlr-randr
 
 

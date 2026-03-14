@@ -515,9 +515,13 @@ static void ade_show_help(void) {
     // Show key hints in a terminal so the user doesn't need to remember commands.
     // Using foot if available; fallback to xterm if installed.
     const char *cmd =
-        "(command -v foot >/dev/null 2>&1 && exec foot -T ADE-Help -e /bin/sh -lc 'printf \"ADE – Arma Desktop Environment\\n\\nF1   = Terminal\\nF2   = Launcher\\nF9   = Help\\nF12  = Quit\\nAlt+Esc = Quit\\n\\n(Press Enter to close this help)\\n\"; read _') "
-        "|| (command -v xterm >/dev/null 2>&1 && exec xterm -T ADE-Help -e /bin/sh -lc 'printf \"ADE – Arma Desktop Environment\\n\\nF1   = Terminal\\nF2   = Launcher\\nF9   = Help\\nF12  = Quit\\nAlt+Esc = Quit\\n\\n(Press Enter to close this help)\\n\"; read _')";
+        "(command -v foot >/dev/null 2>&1 && exec foot -T ADE-Help -e /bin/sh -lc 'printf \"ADE – Arma Desktop Environment\\n\\nF1   = Terminal\\nF2   = Launcher\\nF9   = Help\\nF10  = Screen\\nF12  = Quit\\nAlt+Esc = Quit\\n\\n(Press Enter to close this help)\\n\"; read _') "
+        "|| (command -v xterm >/dev/null 2>&1 && exec xterm -T ADE-Help -e /bin/sh -lc 'printf \"ADE – Arma Desktop Environment\\n\\nF1   = Terminal\\nF2   = Launcher\\nF9   = Help\\nF10  = Screen\\nF12  = Quit\\nAlt+Esc = Quit\\n\\n(Press Enter to close this help)\\n\"; read _')";
     ade_spawn_shell(cmd);
+}
+
+static void ade_show_resolution_panel(void) {
+    ade_spawn_shell("sh launch_resolution.sh");
 }
 
 
@@ -1239,6 +1243,10 @@ static void keyboard_handle_key(
                 ade_show_help();
                 handled = true;
                 break;
+            case XKB_KEY_F10: // screen preferences
+                ade_show_resolution_panel();
+                handled = true;
+                break;
             default:
                 break;
             }
@@ -1437,6 +1445,7 @@ static void ade_deskbar_save_corner(struct tinywl_server *server);
 static bool ade_node_is_deskbar(struct tinywl_server *server, struct wlr_scene_node *node);
 static enum ade_deskbar_corner ade_deskbar_corner_from_position(
         struct tinywl_server *server, double x, double y);
+static void ade_relayout_desktop_scene(struct tinywl_server *server);
 
 static void reset_cursor_mode(struct tinywl_server *server) {
     /* Reset the cursor mode to passthrough. */
@@ -2055,7 +2064,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
                     server->last_icon_click_msec = 0;
                     //ade_launch_terminal();
                     if (server->last_clicked_icon != NULL && server->last_clicked_icon->exec_cmd != NULL) {
-                        ade_spawn(server->last_clicked_icon->exec_cmd);
+                        ade_spawn_shell(server->last_clicked_icon->exec_cmd);
                     }
                 }
             }
@@ -2351,8 +2360,7 @@ static void output_request_state(struct wl_listener *listener, void *data) {
     // Output size/scale can change under Wayland/X11 backends; keep background and cursor in sync.
     ade_update_background(output->server);
     ade_reload_cursor_for_output(output->server, output->wlr_output);
-    
-    ade_deskbar_update_layout(output->server);
+    ade_relayout_desktop_scene(output->server);
 }
 
 static bool ade_get_primary_output_size(struct tinywl_server *server, int *out_w, int *out_h) {
@@ -2370,6 +2378,85 @@ static bool ade_get_primary_output_size(struct tinywl_server *server, int *out_w
         }
     }
     return false;
+}
+
+static void ade_relayout_desktop_scene(struct tinywl_server *server) {
+    if (server == NULL) {
+        return;
+    }
+
+    int ow = 0, oh = 0;
+    if (!ade_get_primary_output_size(server, &ow, &oh) || ow <= 0 || oh <= 0) {
+        ow = 1920;
+        oh = 1080;
+    }
+
+    const int edge_margin = 8;
+    const int min_window_visible_w = 96;
+    const int min_window_visible_h = 48;
+    const int icon_w = 48;
+    const int icon_h = 64;
+
+    struct tinywl_toplevel *toplevel = NULL;
+    wl_list_for_each(toplevel, &server->toplevels, link) {
+        if (toplevel == NULL || toplevel->scene_tree == NULL || toplevel->xdg_toplevel == NULL) {
+            continue;
+        }
+
+        struct wlr_box geo = toplevel->xdg_toplevel->base->geometry;
+        int win_w = (geo.width > 0) ? geo.width : 320;
+        int win_h = (geo.height > 0) ? geo.height : 240;
+
+        int min_x = edge_margin - win_w + min_window_visible_w - geo.x;
+        int max_x = ow - edge_margin - min_window_visible_w - geo.x;
+        int min_y = edge_margin - geo.y;
+        int max_y = oh - edge_margin - min_window_visible_h - geo.y;
+
+        if (max_x < min_x) {
+            int centered = (ow - win_w) / 2 - geo.x;
+            min_x = centered;
+            max_x = centered;
+        }
+        if (max_y < min_y) {
+            int centered = (oh - win_h) / 2 - geo.y;
+            min_y = centered;
+            max_y = centered;
+        }
+
+        int x = toplevel->scene_tree->node.x;
+        int y = toplevel->scene_tree->node.y;
+        if (x < min_x) x = min_x;
+        if (x > max_x) x = max_x;
+        if (y < min_y) y = min_y;
+        if (y > max_y) y = max_y;
+
+        wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
+    }
+
+    if (server->desktop_icons != NULL) {
+        struct wlr_scene_node *node = NULL;
+        wl_list_for_each(node, &server->desktop_icons->children, link) {
+            int x = node->x;
+            int y = node->y;
+
+            int min_x = edge_margin;
+            int min_y = edge_margin;
+            int max_x = ow - edge_margin - icon_w;
+            int max_y = oh - edge_margin - icon_h;
+
+            if (max_x < min_x) max_x = min_x;
+            if (max_y < min_y) max_y = min_y;
+
+            if (x < min_x) x = min_x;
+            if (x > max_x) x = max_x;
+            if (y < min_y) y = min_y;
+            if (y > max_y) y = max_y;
+
+            wlr_scene_node_set_position(node, x, y);
+        }
+    }
+
+    ade_deskbar_update_layout(server);
 }
 
 static const char *ade_deskbar_corner_name(enum ade_deskbar_corner corner) {
@@ -2711,7 +2798,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
     ade_reload_cursor_for_output(server, wlr_output);
     
     ade_deskbar_init(server);
-    ade_deskbar_update_layout(server);
+    ade_relayout_desktop_scene(server);
 
     int ow = 0, oh = 0;
     wlr_output_effective_resolution(wlr_output, &ow, &oh);
