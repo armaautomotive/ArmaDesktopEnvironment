@@ -40,6 +40,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <cairo/cairo.h>
+#include <pango/pangocairo.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/render/allocator.h>
@@ -88,11 +90,15 @@ enum tinywl_cursor_mode {
     TINYWL_CURSOR_DESKBAR_DRAG,
 };
 
-enum ade_deskbar_corner {
+enum ade_deskbar_anchor {
     ADE_DESKBAR_TOP_LEFT,
+    ADE_DESKBAR_TOP_CENTER,
     ADE_DESKBAR_TOP_RIGHT,
-    ADE_DESKBAR_BOTTOM_LEFT,
+    ADE_DESKBAR_RIGHT_CENTER,
     ADE_DESKBAR_BOTTOM_RIGHT,
+    ADE_DESKBAR_BOTTOM_CENTER,
+    ADE_DESKBAR_BOTTOM_LEFT,
+    ADE_DESKBAR_LEFT_CENTER,
 };
 
 
@@ -167,7 +173,7 @@ struct tinywl_server {
     int deskbar_app_count;
     int deskbar_width;
     int deskbar_height;
-    enum ade_deskbar_corner deskbar_corner;
+    enum ade_deskbar_anchor deskbar_anchor;
     bool deskbar_drag_candidate;
     bool deskbar_dragging;
     double deskbar_press_x;
@@ -175,6 +181,8 @@ struct tinywl_server {
     double deskbar_grab_dx;
     double deskbar_grab_dy;
     char deskbar_conf_path[512];
+    char deskbar_clock_text[16];
+    int deskbar_clock_minute;
     
     struct ade_desktop_icons desktop_icons_state;
     char desktop_icons_conf_path[512];
@@ -506,6 +514,204 @@ static struct wlr_buffer *ade_load_png_as_wlr_buffer(const char *path) {
     stbi_image_free(rgba);
 
     wlr_buffer_init(&buf->base, &ade_pixel_buffer_impl, (size_t)w, (size_t)h);
+    return &buf->base;
+}
+
+static struct wlr_buffer *ade_make_text_buffer(const char *text, int *out_w, int *out_h) {
+    if (text == NULL || text[0] == '\0') {
+        return NULL;
+    }
+
+    const int pad_x = 2;
+    const int pad_y = 1;
+    const int shadow_dx = 1;
+    const int shadow_dy = 1;
+
+    cairo_surface_t *scratch = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+    cairo_t *cr0 = cairo_create(scratch);
+    PangoLayout *layout0 = pango_cairo_create_layout(cr0);
+    PangoFontDescription *desc = pango_font_description_from_string("Sans 9");
+    pango_layout_set_font_description(layout0, desc);
+    pango_layout_set_text(layout0, text, -1);
+    pango_layout_set_single_paragraph_mode(layout0, TRUE);
+
+    int tw = 0, th = 0;
+    pango_layout_get_pixel_size(layout0, &tw, &th);
+
+    g_object_unref(layout0);
+    pango_font_description_free(desc);
+    cairo_destroy(cr0);
+    cairo_surface_destroy(scratch);
+
+    if (tw <= 0 || th <= 0) {
+        return NULL;
+    }
+
+    int width = tw + pad_x * 2 + shadow_dx;
+    int height = th + pad_y * 2 + shadow_dy;
+    cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+    cairo_t *cr = cairo_create(surface);
+
+    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+    cairo_font_options_t *font_opts = cairo_font_options_create();
+    cairo_font_options_set_antialias(font_opts, CAIRO_ANTIALIAS_SUBPIXEL);
+    cairo_font_options_set_hint_style(font_opts, CAIRO_HINT_STYLE_SLIGHT);
+    cairo_set_font_options(cr, font_opts);
+    cairo_font_options_destroy(font_opts);
+
+    PangoLayout *layout = pango_cairo_create_layout(cr);
+    PangoFontDescription *desc2 = pango_font_description_from_string("Sans 9");
+    pango_layout_set_font_description(layout, desc2);
+    pango_layout_set_text(layout, text, -1);
+
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.45);
+    cairo_move_to(cr, pad_x + shadow_dx, pad_y + shadow_dy);
+    pango_cairo_show_layout(cr, layout);
+
+    cairo_set_source_rgba(cr, 0.14, 0.14, 0.14, 1.0);
+    cairo_move_to(cr, pad_x, pad_y);
+    pango_cairo_show_layout(cr, layout);
+
+    g_object_unref(layout);
+    pango_font_description_free(desc2);
+    cairo_surface_flush(surface);
+
+    int stride = cairo_image_surface_get_stride(surface);
+    uint8_t *src = cairo_image_surface_get_data(surface);
+
+    struct ade_pixel_buffer *buf = calloc(1, sizeof(*buf));
+    if (buf == NULL) {
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        return NULL;
+    }
+
+    buf->width = width;
+    buf->height = height;
+    buf->stride = (size_t)stride;
+    buf->format = DRM_FORMAT_ARGB8888;
+    buf->data = malloc((size_t)stride * (size_t)height);
+    if (buf->data == NULL) {
+        free(buf);
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        return NULL;
+    }
+    memcpy(buf->data, src, (size_t)stride * (size_t)height);
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+
+    wlr_buffer_init(&buf->base, &ade_pixel_buffer_impl, (size_t)width, (size_t)height);
+    if (out_w) *out_w = width;
+    if (out_h) *out_h = height;
+    return &buf->base;
+}
+
+static struct wlr_buffer *ade_make_tab_title_buffer(const char *text,
+        int max_text_w, int *out_w, int *out_h) {
+    if (text == NULL || text[0] == '\0') {
+        text = "Window";
+    }
+
+    const int pad_x = 1;
+    const int pad_y = 1;
+    const int shadow_dx = 1;
+    const int shadow_dy = 1;
+
+    cairo_surface_t *scratch = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+    cairo_t *cr0 = cairo_create(scratch);
+    PangoLayout *layout0 = pango_cairo_create_layout(cr0);
+    PangoFontDescription *desc = pango_font_description_from_string("Sans 9");
+    pango_layout_set_font_description(layout0, desc);
+    pango_layout_set_text(layout0, text, -1);
+    pango_layout_set_single_paragraph_mode(layout0, TRUE);
+    pango_layout_set_ellipsize(layout0, PANGO_ELLIPSIZE_END);
+    if (max_text_w > 0) {
+        pango_layout_set_width(layout0, max_text_w * PANGO_SCALE);
+    }
+
+    int tw = 0, th = 0;
+    pango_layout_get_pixel_size(layout0, &tw, &th);
+
+    g_object_unref(layout0);
+    pango_font_description_free(desc);
+    cairo_destroy(cr0);
+    cairo_surface_destroy(scratch);
+
+    if (tw <= 0 || th <= 0) {
+        return NULL;
+    }
+
+    int width = tw + pad_x * 2 + shadow_dx;
+    int height = th + pad_y * 2 + shadow_dy;
+    cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+    cairo_t *cr = cairo_create(surface);
+
+    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+    cairo_font_options_t *font_opts = cairo_font_options_create();
+    cairo_font_options_set_antialias(font_opts, CAIRO_ANTIALIAS_SUBPIXEL);
+    cairo_font_options_set_hint_style(font_opts, CAIRO_HINT_STYLE_SLIGHT);
+    cairo_set_font_options(cr, font_opts);
+    cairo_font_options_destroy(font_opts);
+
+    PangoLayout *layout = pango_cairo_create_layout(cr);
+    PangoFontDescription *desc2 = pango_font_description_from_string("Sans 9");
+    pango_layout_set_font_description(layout, desc2);
+    pango_layout_set_text(layout, text, -1);
+    pango_layout_set_single_paragraph_mode(layout, TRUE);
+    pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END);
+    if (max_text_w > 0) {
+        pango_layout_set_width(layout, max_text_w * PANGO_SCALE);
+    }
+
+    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.28);
+    cairo_move_to(cr, pad_x + shadow_dx, pad_y + shadow_dy);
+    pango_cairo_show_layout(cr, layout);
+
+    cairo_set_source_rgba(cr, 0.23, 0.16, 0.05, 1.0);
+    cairo_move_to(cr, pad_x, pad_y);
+    pango_cairo_show_layout(cr, layout);
+
+    g_object_unref(layout);
+    pango_font_description_free(desc2);
+    cairo_surface_flush(surface);
+
+    int stride = cairo_image_surface_get_stride(surface);
+    uint8_t *src = cairo_image_surface_get_data(surface);
+
+    struct ade_pixel_buffer *buf = calloc(1, sizeof(*buf));
+    if (buf == NULL) {
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        return NULL;
+    }
+
+    buf->width = width;
+    buf->height = height;
+    buf->stride = (size_t)stride;
+    buf->format = DRM_FORMAT_ARGB8888;
+    buf->data = malloc((size_t)stride * (size_t)height);
+    if (buf->data == NULL) {
+        free(buf);
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        return NULL;
+    }
+    memcpy(buf->data, src, (size_t)stride * (size_t)height);
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+
+    wlr_buffer_init(&buf->base, &ade_pixel_buffer_impl, (size_t)width, (size_t)height);
+    if (out_w) *out_w = width;
+    if (out_h) *out_h = height;
     return &buf->base;
 }
 
@@ -938,15 +1144,8 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
     // Remove previous text nodes
     ade_tab_clear_text(toplevel);
 
-    char safe_title[128];
-    ade_sanitize_title_ascii(title, safe_title, sizeof(safe_title));
-
     // Create a subtree for the text so we can destroy/recreate easily.
     toplevel->tab_text_tree = wlr_scene_tree_create(toplevel->tab_tree);
-
-    // Render settings
-    // Use a smaller pixel size; the soft halo makes this read well and feel more "font-like".
-    const int px = 2;
 
     // Position inside the tab
     // Leave space for the close button on the left, plus a small gap.
@@ -960,17 +1159,19 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
 
     const int left_pad = 14 + close_btn_pad_left + close_btn_w + close_btn_gap;
     const int right_pad = expand_btn_pad_right + expand_btn_w + expand_btn_gap;
-    int origin_x = left_pad;
-    int origin_y = ADE_TAB_CONTENT_Y_OFFSET + 1;
-
-    // Text color: a darker brown-ish for contrast (RGB only here)
-    const float ink_rgb[3] = { 0.25f, 0.18f, 0.05f };
-
-    // Resize the yellow tab to fit the text (with clamps)
-    int text_w = ade_title_measure_px(safe_title, px);
-    int desired_w = left_pad + right_pad + text_w;
     const int min_w = 120;
     const int max_w = 420;
+    int max_text_w = max_w - left_pad - right_pad;
+    if (max_text_w < 32) {
+        max_text_w = 32;
+    }
+
+    int text_w = 0;
+    int text_h = 0;
+    struct wlr_buffer *title_buf = ade_make_tab_title_buffer(title, max_text_w, &text_w, &text_h);
+
+    // Resize the yellow tab to fit the rendered text (with clamps)
+    int desired_w = left_pad + right_pad + text_w;
     if (desired_w < min_w) desired_w = min_w;
     if (desired_w > max_w) desired_w = max_w;
 
@@ -1009,12 +1210,19 @@ static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *t
     // Build/rebuild expand button for this tab width
     ade_tab_build_expand(toplevel, desired_w);
 
-    // Draw title using soft glyphs (pseudo-AA)
-    const int max_chars = 24;
-    for (int i = 0; safe_title[i] != '\0' && i < max_chars; i++) {
-        char c = safe_title[i];
-        int char_x = origin_x + i * ((5 + 1) * px);
-        ade_tab_draw_glyph_soft(toplevel->tab_text_tree, c, char_x, origin_y, px, ink_rgb);
+    if (title_buf != NULL) {
+        int origin_x = left_pad;
+        int origin_y = (ADE_TAB_HEIGHT - text_h) / 2;
+        if (origin_y < 0) {
+            origin_y = 0;
+        }
+
+        struct wlr_scene_buffer *title_scene =
+            wlr_scene_buffer_create(toplevel->tab_text_tree, title_buf);
+        wlr_buffer_drop(title_buf);
+        if (title_scene != NULL) {
+            wlr_scene_node_set_position(&title_scene->node, origin_x, origin_y);
+        }
     }
 
     // Keep text and close button above the tab rectangle
@@ -1443,9 +1651,12 @@ static void ade_deskbar_update_layout(struct tinywl_server *server);
 static bool ade_get_primary_output_size(struct tinywl_server *server, int *out_w, int *out_h);
 static void ade_deskbar_save_corner(struct tinywl_server *server);
 static bool ade_node_is_deskbar(struct tinywl_server *server, struct wlr_scene_node *node);
-static enum ade_deskbar_corner ade_deskbar_corner_from_position(
+static enum ade_deskbar_anchor ade_deskbar_anchor_from_position(
         struct tinywl_server *server, double x, double y);
+static enum ade_deskbar_anchor ade_deskbar_anchor_from_cursor(
+        struct tinywl_server *server, double cursor_x, double cursor_y);
 static void ade_relayout_desktop_scene(struct tinywl_server *server);
+static bool ade_update_deskbar_clock(struct tinywl_server *server);
 
 static void reset_cursor_mode(struct tinywl_server *server) {
     /* Reset the cursor mode to passthrough. */
@@ -1584,7 +1795,7 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
     } else if (server->cursor_mode == TINYWL_CURSOR_DESKBAR_DRAG) {
         if (server->deskbar_tree != NULL) {
             int ow = 0, oh = 0;
-            int margin = 8;
+            int margin = 0;
             int nx = (int)(server->cursor->x - server->deskbar_grab_dx);
             int ny = (int)(server->cursor->y - server->deskbar_grab_dy);
 
@@ -1741,11 +1952,13 @@ static const uint8_t *ade_glyph_5x7(char c) {
     static const uint8_t GLYPH_Z[7] = {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F};
 
     static const uint8_t GLYPH_DOT[7]  = {0,0,0,0,0,0,0x04};
+    static const uint8_t GLYPH_COLON[7] = {0,0x04,0,0,0x04,0,0};
     static const uint8_t GLYPH_DASH[7] = {0,0,0,0x1F,0,0,0};
     static const uint8_t GLYPH_UND[7]  = {0,0,0,0,0,0,0x1F};
 
     if (c == ' ') return GLYPH_SPACE;
     if (c == '.') return GLYPH_DOT;
+    if (c == ':') return GLYPH_COLON;
     if (c == '-') return GLYPH_DASH;
     if (c == '_') return GLYPH_UND;
 
@@ -2029,10 +2242,10 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
         if (event->button == BTN_LEFT &&
             (server->cursor_mode == TINYWL_CURSOR_DESKBAR_DRAG || server->deskbar_drag_candidate)) {
             if (server->deskbar_tree != NULL) {
-                server->deskbar_corner = ade_deskbar_corner_from_position(
+                server->deskbar_anchor = ade_deskbar_anchor_from_cursor(
                     server,
-                    server->deskbar_tree->node.x,
-                    server->deskbar_tree->node.y);
+                    server->cursor->x,
+                    server->cursor->y);
                 ade_deskbar_update_layout(server);
                 ade_deskbar_save_corner(server);
             }
@@ -2331,6 +2544,10 @@ static void output_frame(struct wl_listener *listener, void *data) {
         return;
     }
 
+    if (ade_update_deskbar_clock(output->server)) {
+        ade_deskbar_update_layout(output->server);
+    }
+
     /* Render the scene if needed and commit the output */
     wlr_scene_output_commit(scene_output, NULL);
 
@@ -2378,6 +2595,31 @@ static bool ade_get_primary_output_size(struct tinywl_server *server, int *out_w
         }
     }
     return false;
+}
+
+static bool ade_update_deskbar_clock(struct tinywl_server *server) {
+    if (server == NULL) {
+        return false;
+    }
+
+    time_t now = time(NULL);
+    struct tm tm_now;
+    if (localtime_r(&now, &tm_now) == NULL) {
+        return false;
+    }
+
+    int minute_of_day = tm_now.tm_hour * 60 + tm_now.tm_min;
+    char new_text[16];
+    snprintf(new_text, sizeof(new_text), "%02d:%02d", tm_now.tm_hour, tm_now.tm_min);
+
+    if (server->deskbar_clock_minute == minute_of_day &&
+        strcmp(server->deskbar_clock_text, new_text) == 0) {
+        return false;
+    }
+
+    server->deskbar_clock_minute = minute_of_day;
+    snprintf(server->deskbar_clock_text, sizeof(server->deskbar_clock_text), "%s", new_text);
+    return true;
 }
 
 static void ade_relayout_desktop_scene(struct tinywl_server *server) {
@@ -2459,35 +2701,55 @@ static void ade_relayout_desktop_scene(struct tinywl_server *server) {
     ade_deskbar_update_layout(server);
 }
 
-static const char *ade_deskbar_corner_name(enum ade_deskbar_corner corner) {
-    switch (corner) {
+static const char *ade_deskbar_corner_name(enum ade_deskbar_anchor anchor) {
+    switch (anchor) {
         case ADE_DESKBAR_TOP_LEFT:
             return "top-left";
+        case ADE_DESKBAR_TOP_CENTER:
+            return "top-center";
         case ADE_DESKBAR_TOP_RIGHT:
             return "top-right";
-        case ADE_DESKBAR_BOTTOM_LEFT:
-            return "bottom-left";
+        case ADE_DESKBAR_RIGHT_CENTER:
+            return "right-center";
         case ADE_DESKBAR_BOTTOM_RIGHT:
             return "bottom-right";
+        case ADE_DESKBAR_BOTTOM_CENTER:
+            return "bottom-center";
+        case ADE_DESKBAR_BOTTOM_LEFT:
+            return "bottom-left";
+        case ADE_DESKBAR_LEFT_CENTER:
+            return "left-center";
     }
     return "top-right";
 }
 
-static enum ade_deskbar_corner ade_parse_deskbar_corner(const char *value) {
+static enum ade_deskbar_anchor ade_parse_deskbar_corner(const char *value) {
     if (value == NULL) {
         return ADE_DESKBAR_TOP_RIGHT;
     }
     if (strcmp(value, "top-left") == 0) {
         return ADE_DESKBAR_TOP_LEFT;
     }
+    if (strcmp(value, "top-center") == 0) {
+        return ADE_DESKBAR_TOP_CENTER;
+    }
     if (strcmp(value, "top-right") == 0) {
         return ADE_DESKBAR_TOP_RIGHT;
+    }
+    if (strcmp(value, "right-center") == 0) {
+        return ADE_DESKBAR_RIGHT_CENTER;
+    }
+    if (strcmp(value, "bottom-right") == 0) {
+        return ADE_DESKBAR_BOTTOM_RIGHT;
+    }
+    if (strcmp(value, "bottom-center") == 0) {
+        return ADE_DESKBAR_BOTTOM_CENTER;
     }
     if (strcmp(value, "bottom-left") == 0) {
         return ADE_DESKBAR_BOTTOM_LEFT;
     }
-    if (strcmp(value, "bottom-right") == 0) {
-        return ADE_DESKBAR_BOTTOM_RIGHT;
+    if (strcmp(value, "left-center") == 0) {
+        return ADE_DESKBAR_LEFT_CENTER;
     }
     return ADE_DESKBAR_TOP_RIGHT;
 }
@@ -2504,7 +2766,7 @@ static void ade_deskbar_save_corner(struct tinywl_server *server) {
         return;
     }
 
-    fprintf(f, "corner=%s\n", ade_deskbar_corner_name(server->deskbar_corner));
+    fprintf(f, "corner=%s\n", ade_deskbar_corner_name(server->deskbar_anchor));
     fclose(f);
 }
 
@@ -2522,7 +2784,7 @@ static void ade_deskbar_load_corner(struct tinywl_server *server) {
     while (fgets(line, sizeof(line), f) != NULL) {
         char value[64];
         if (sscanf(line, "corner=%63s", value) == 1) {
-            server->deskbar_corner = ade_parse_deskbar_corner(value);
+            server->deskbar_anchor = ade_parse_deskbar_corner(value);
         }
     }
 
@@ -2545,7 +2807,19 @@ static bool ade_node_is_deskbar(struct tinywl_server *server, struct wlr_scene_n
     return false;
 }
 
-static enum ade_deskbar_corner ade_deskbar_corner_from_position(
+static bool ade_deskbar_is_full_width_anchor(enum ade_deskbar_anchor anchor) {
+    return anchor == ADE_DESKBAR_TOP_CENTER || anchor == ADE_DESKBAR_BOTTOM_CENTER;
+}
+
+static bool ade_deskbar_is_full_height_anchor(enum ade_deskbar_anchor anchor) {
+    return anchor == ADE_DESKBAR_LEFT_CENTER || anchor == ADE_DESKBAR_RIGHT_CENTER;
+}
+
+static bool ade_deskbar_apps_horizontal(enum ade_deskbar_anchor anchor) {
+    return anchor == ADE_DESKBAR_TOP_CENTER || anchor == ADE_DESKBAR_BOTTOM_CENTER;
+}
+
+static enum ade_deskbar_anchor ade_deskbar_anchor_from_position(
         struct tinywl_server *server, double x, double y) {
     int ow = 0, oh = 0;
     if (!ade_get_primary_output_size(server, &ow, &oh) || ow <= 0 || oh <= 0) {
@@ -2554,13 +2828,61 @@ static enum ade_deskbar_corner ade_deskbar_corner_from_position(
 
     double cx = x + (server->deskbar_width / 2.0);
     double cy = y + (server->deskbar_height / 2.0);
-    bool left = cx < (ow / 2.0);
-    bool top = cy < (oh / 2.0);
+    double x_ratio = cx / (double)ow;
+    double y_ratio = cy / (double)oh;
 
-    if (top) {
-        return left ? ADE_DESKBAR_TOP_LEFT : ADE_DESKBAR_TOP_RIGHT;
+    if (y_ratio <= 0.20) {
+        if (x_ratio <= 0.33) return ADE_DESKBAR_TOP_LEFT;
+        if (x_ratio >= 0.67) return ADE_DESKBAR_TOP_RIGHT;
+        return ADE_DESKBAR_TOP_CENTER;
     }
-    return left ? ADE_DESKBAR_BOTTOM_LEFT : ADE_DESKBAR_BOTTOM_RIGHT;
+    if (y_ratio >= 0.80) {
+        if (x_ratio <= 0.33) return ADE_DESKBAR_BOTTOM_LEFT;
+        if (x_ratio >= 0.67) return ADE_DESKBAR_BOTTOM_RIGHT;
+        return ADE_DESKBAR_BOTTOM_CENTER;
+    }
+    if (x_ratio <= 0.20) {
+        return ADE_DESKBAR_LEFT_CENTER;
+    }
+    if (x_ratio >= 0.80) {
+        return ADE_DESKBAR_RIGHT_CENTER;
+    }
+
+    return (cy < (oh / 2.0)) ? ADE_DESKBAR_TOP_CENTER : ADE_DESKBAR_BOTTOM_CENTER;
+}
+
+static enum ade_deskbar_anchor ade_deskbar_anchor_from_cursor(
+        struct tinywl_server *server, double cursor_x, double cursor_y) {
+    int ow = 0, oh = 0;
+    if (!ade_get_primary_output_size(server, &ow, &oh) || ow <= 0 || oh <= 0) {
+        return ADE_DESKBAR_TOP_RIGHT;
+    }
+
+    double x_ratio = cursor_x / (double)ow;
+    double y_ratio = cursor_y / (double)oh;
+
+    if (y_ratio <= 0.20) {
+        if (x_ratio <= 0.33) return ADE_DESKBAR_TOP_LEFT;
+        if (x_ratio >= 0.67) return ADE_DESKBAR_TOP_RIGHT;
+        return ADE_DESKBAR_TOP_CENTER;
+    }
+    if (y_ratio >= 0.80) {
+        if (x_ratio <= 0.33) return ADE_DESKBAR_BOTTOM_LEFT;
+        if (x_ratio >= 0.67) return ADE_DESKBAR_BOTTOM_RIGHT;
+        return ADE_DESKBAR_BOTTOM_CENTER;
+    }
+    if (x_ratio <= 0.20) {
+        if (y_ratio <= 0.33) return ADE_DESKBAR_TOP_LEFT;
+        if (y_ratio >= 0.67) return ADE_DESKBAR_BOTTOM_LEFT;
+        return ADE_DESKBAR_LEFT_CENTER;
+    }
+    if (x_ratio >= 0.80) {
+        if (y_ratio <= 0.33) return ADE_DESKBAR_TOP_RIGHT;
+        if (y_ratio >= 0.67) return ADE_DESKBAR_BOTTOM_RIGHT;
+        return ADE_DESKBAR_RIGHT_CENTER;
+    }
+
+    return (cursor_y < (oh / 2.0)) ? ADE_DESKBAR_TOP_CENTER : ADE_DESKBAR_BOTTOM_CENTER;
 }
 
 
@@ -2592,35 +2914,74 @@ static void ade_deskbar_rebuild_apps(struct tinywl_server *server) {
     }
     server->deskbar_apps_tree = wlr_scene_tree_create(server->deskbar_tree);
 
-    const int pad = 3;
-    const int slot_w = 18;
-    const int slot_gap = 3;
-    const int slot_h = server->deskbar_height - pad * 2;
+    const int pad = 6;
+    const int clock_gap = 8;
+    const int slot_gap = 4;
+    const bool apps_horizontal = ade_deskbar_apps_horizontal(server->deskbar_anchor);
+    int clock_w = 0, clock_h = 0;
+    int slot_w = 72;
+    int slot_h = 18;
 
     const float slot_bg[4]     = { 0.78f, 0.78f, 0.78f, 1.0f };
     const float slot_border[4] = { 0.62f, 0.62f, 0.62f, 1.0f };
+    int content_y = pad;
 
-    int x = pad;
+    if (server->deskbar_clock_text[0] != '\0') {
+        struct wlr_buffer *clock_buf = ade_make_text_buffer(
+            server->deskbar_clock_text, &clock_w, &clock_h);
+        if (clock_buf != NULL) {
+            int clock_x = (server->deskbar_width - clock_w) / 2;
+            int clock_y = pad;
+            struct wlr_scene_buffer *clock_scene =
+                wlr_scene_buffer_create(server->deskbar_apps_tree, clock_buf);
+            wlr_buffer_drop(clock_buf);
+            if (clock_scene != NULL) {
+                wlr_scene_node_set_position(&clock_scene->node, clock_x, clock_y);
+            }
+            content_y += clock_h + clock_gap;
+        }
+    }
+
+    if (!apps_horizontal) {
+        int max_slot_w = server->deskbar_width - pad * 2;
+        if (max_slot_w < 56) max_slot_w = 56;
+        if (max_slot_w > 96) max_slot_w = 96;
+        slot_w = max_slot_w;
+    }
+
+    int base_x = apps_horizontal ? pad : (server->deskbar_width - slot_w) / 2;
+    int base_y = content_y;
+
+    if (apps_horizontal) {
+        int total_w = 0;
+        if (server->deskbar_app_count > 0) {
+            total_w = server->deskbar_app_count * slot_w +
+                (server->deskbar_app_count - 1) * slot_gap;
+        }
+        if (total_w > 0 && total_w < server->deskbar_width - pad * 2) {
+            base_x = (server->deskbar_width - total_w) / 2;
+        }
+    }
 
     for (int i = 0; i < server->deskbar_app_count; i++) {
+        int x = apps_horizontal ? (base_x + i * (slot_w + slot_gap)) : base_x;
+        int y = apps_horizontal ? base_y : (base_y + i * (slot_h + slot_gap));
+
         struct wlr_scene_rect *r =
             wlr_scene_rect_create(server->deskbar_apps_tree, slot_w, slot_h, slot_bg);
-        wlr_scene_node_set_position(&r->node, x, pad);
+        wlr_scene_node_set_position(&r->node, x, y);
 
-        // Subtle border: top/bottom/left/right
         struct wlr_scene_rect *bt = wlr_scene_rect_create(server->deskbar_apps_tree, slot_w, 1, slot_border);
-        wlr_scene_node_set_position(&bt->node, x, pad);
+        wlr_scene_node_set_position(&bt->node, x, y);
 
         struct wlr_scene_rect *bb = wlr_scene_rect_create(server->deskbar_apps_tree, slot_w, 1, slot_border);
-        wlr_scene_node_set_position(&bb->node, x, pad + slot_h - 1);
+        wlr_scene_node_set_position(&bb->node, x, y + slot_h - 1);
 
         struct wlr_scene_rect *bl = wlr_scene_rect_create(server->deskbar_apps_tree, 1, slot_h, slot_border);
-        wlr_scene_node_set_position(&bl->node, x, pad);
+        wlr_scene_node_set_position(&bl->node, x, y);
 
         struct wlr_scene_rect *br = wlr_scene_rect_create(server->deskbar_apps_tree, 1, slot_h, slot_border);
-        wlr_scene_node_set_position(&br->node, x + slot_w - 1, pad);
-
-        x += slot_w + slot_gap;
+        wlr_scene_node_set_position(&br->node, x + slot_w - 1, y);
     }
 
     wlr_scene_node_raise_to_top(&server->deskbar_apps_tree->node);
@@ -2637,43 +2998,98 @@ static void ade_deskbar_update_layout(struct tinywl_server *server) {
 
     server->deskbar_app_count = ade_count_mapped_toplevels(server);
 
-    const int margin = 8;
-    const int base_w = 90;   // reserved for future tray/clock
-    const int slot_w = 18;
-    const int slot_gap = 3;
+    const int margin = 0;
+    const int min_width = 100;
+    const int pad = 6;
+    const int clock_gap = 8;
+    const int slot_gap = 4;
+    const bool apps_horizontal = ade_deskbar_apps_horizontal(server->deskbar_anchor);
+    const bool full_width = ade_deskbar_is_full_width_anchor(server->deskbar_anchor);
+    const bool full_height = ade_deskbar_is_full_height_anchor(server->deskbar_anchor);
+    int slot_w = apps_horizontal ? 18 : 72;
+    int slot_h = 18;
 
-    server->deskbar_height = 24;
+    int clock_w = 44;
+    int clock_h = 0;
+    struct wlr_buffer *clock_measure_buf = ade_make_text_buffer(
+        server->deskbar_clock_text, &clock_w, &clock_h);
+    if (clock_measure_buf != NULL) {
+        wlr_buffer_drop(clock_measure_buf);
+    }
+    if (!apps_horizontal) {
+        int max_slot_w = min_width - pad * 2;
+        if (max_slot_w < 56) max_slot_w = 56;
+        if (max_slot_w > 96) max_slot_w = 96;
+        slot_w = max_slot_w;
+    }
 
-    int apps_w = 0;
+    int compact_width = clock_w + pad * 2;
+    if (slot_w + pad * 2 > compact_width) {
+        compact_width = slot_w + pad * 2;
+    }
+    if (compact_width < min_width) {
+        compact_width = min_width;
+    }
+
+    if (full_width) {
+        server->deskbar_width = ow;
+    } else {
+        server->deskbar_width = compact_width;
+        if (server->deskbar_width > ow - margin * 2) {
+            server->deskbar_width = ow - margin * 2;
+        }
+    }
+
+    int compact_height = pad + clock_h + pad;
     if (server->deskbar_app_count > 0) {
-        apps_w = (server->deskbar_app_count * slot_w) + ((server->deskbar_app_count - 1) * slot_gap);
+        if (apps_horizontal) {
+            compact_height += clock_gap + slot_h + pad;
+        } else {
+            compact_height += clock_gap +
+                server->deskbar_app_count * slot_h +
+                (server->deskbar_app_count - 1) * slot_gap + pad;
+        }
+    }
+    if (compact_height < 24) {
+        compact_height = 24;
     }
 
-    server->deskbar_width = base_w + 6 + apps_w;
-
-    // Clamp so it can't go off-screen
-    if (server->deskbar_width > ow - margin * 2) {
-        server->deskbar_width = ow - margin * 2;
-    }
+    server->deskbar_height = full_height ? oh : compact_height;
 
     int x = margin;
     int y = margin;
-    switch (server->deskbar_corner) {
+    switch (server->deskbar_anchor) {
         case ADE_DESKBAR_TOP_LEFT:
             x = margin;
             y = margin;
             break;
-        case ADE_DESKBAR_TOP_RIGHT:
-            x = ow - margin - server->deskbar_width;
+        case ADE_DESKBAR_TOP_CENTER:
+            x = 0;
             y = margin;
+            break;
+        case ADE_DESKBAR_TOP_RIGHT:
+            x = ow - server->deskbar_width;
+            y = margin;
+            break;
+        case ADE_DESKBAR_RIGHT_CENTER:
+            x = ow - server->deskbar_width;
+            y = 0;
+            break;
+        case ADE_DESKBAR_BOTTOM_RIGHT:
+            x = ow - server->deskbar_width;
+            y = oh - server->deskbar_height;
+            break;
+        case ADE_DESKBAR_BOTTOM_CENTER:
+            x = 0;
+            y = oh - server->deskbar_height;
             break;
         case ADE_DESKBAR_BOTTOM_LEFT:
             x = margin;
-            y = oh - margin - server->deskbar_height;
+            y = oh - server->deskbar_height;
             break;
-        case ADE_DESKBAR_BOTTOM_RIGHT:
-            x = ow - margin - server->deskbar_width;
-            y = oh - margin - server->deskbar_height;
+        case ADE_DESKBAR_LEFT_CENTER:
+            x = 0;
+            y = 0;
             break;
     }
     if (x < margin) x = margin;
@@ -2698,9 +3114,12 @@ static void ade_deskbar_init(struct tinywl_server *server) {
     server->deskbar_height = 24;
     server->deskbar_width = 140;
     server->deskbar_app_count = 0;
-    server->deskbar_corner = ADE_DESKBAR_TOP_RIGHT;
+    server->deskbar_anchor = ADE_DESKBAR_TOP_RIGHT;
+    server->deskbar_clock_minute = -1;
+    server->deskbar_clock_text[0] = '\0';
     snprintf(server->deskbar_conf_path, sizeof(server->deskbar_conf_path), "%s", "deskbar.conf");
     ade_deskbar_load_corner(server);
+    ade_update_deskbar_clock(server);
 
     server->deskbar_tree = wlr_scene_tree_create(&server->scene->tree);
 
