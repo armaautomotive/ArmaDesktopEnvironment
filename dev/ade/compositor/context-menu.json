@@ -1,0 +1,19 @@
+[
+  {
+    "label": "Applications",
+    "children": [
+      { "label": "Terminal", "action": "terminal" },
+      { "label": "Files", "action": "files" },
+      { "label": "Launcher", "action": "launcher" },
+      { "label": "Screen", "action": "screen" }
+    ]
+  },
+  {
+    "label": "Games",
+    "children": [
+      { "label": "Doom", "action": "doom" }
+    ]
+  },
+  { "label": "Help", "action": "help" },
+  { "label": "Quit", "action": "quit" }
+]
