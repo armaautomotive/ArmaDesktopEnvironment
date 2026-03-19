@@ -196,6 +196,8 @@ struct tinywl_server {
     // Desktop icon double-click tracking
     uint32_t last_icon_click_msec;
     int icon_click_count;
+    uint32_t last_tab_click_msec;
+    struct tinywl_toplevel *last_tab_clicked_toplevel;
     
     // Desktop icon drag state
     struct wlr_scene_node *dragged_icon_node;
@@ -290,6 +292,11 @@ struct tinywl_toplevel {
     int restore_y;
     int restore_w;
     int restore_h;
+    bool expanded;
+    int expanded_restore_x;
+    int expanded_restore_y;
+    int expanded_restore_w;
+    int expanded_restore_h;
     bool minimized;
     int minimized_restore_x;
     int minimized_restore_y;
@@ -482,6 +489,7 @@ static void ade_update_background(struct tinywl_server *server);
 static void ade_load_background_color(struct tinywl_server *server, const char *path);
 static void ade_minimize_toplevel(struct tinywl_toplevel *toplevel);
 static void ade_restore_minimized_toplevel(struct tinywl_toplevel *toplevel);
+static void ade_toggle_toplevel_expand(struct tinywl_toplevel *toplevel);
 
 // Ensure the xcursor theme is loaded at the output scale.
 // If the cursor theme is only loaded at scale=1 on a HiDPI output,
@@ -936,6 +944,7 @@ static bool ade_load_desktop_icon_position(struct tinywl_server *server,
         const char *title, const char *command, int *out_x, int *out_y);
 static void ade_deskbar_update_layout(struct tinywl_server *server);
 static void ade_relayout_desktop_scene(struct tinywl_server *server);
+static bool ade_get_primary_output_size(struct tinywl_server *server, int *out_w, int *out_h);
 static void ade_request_quit(struct tinywl_server *server);
 static void ade_context_menu_close(struct tinywl_server *server);
 static void ade_context_submenu_close(struct tinywl_server *server);
@@ -2242,6 +2251,7 @@ static void ade_minimize_toplevel(struct tinywl_toplevel *toplevel) {
     if (toplevel->minimized) {
         return;
     }
+    toplevel->expanded = false;
 
     struct tinywl_server *server = toplevel->server;
     toplevel->minimized = true;
@@ -2262,6 +2272,52 @@ static void ade_minimize_toplevel(struct tinywl_toplevel *toplevel) {
         focus_toplevel(next);
     }
     ade_deskbar_update_layout(server);
+}
+
+static void ade_toggle_toplevel_expand(struct tinywl_toplevel *toplevel) {
+    if (toplevel == NULL || toplevel->scene_tree == NULL ||
+            toplevel->xdg_toplevel == NULL || toplevel->xdg_toplevel->base == NULL ||
+            toplevel->server == NULL) {
+        return;
+    }
+
+    struct wlr_box geo = toplevel->xdg_toplevel->base->geometry;
+    if (toplevel->expanded) {
+        toplevel->expanded = false;
+        wlr_scene_node_set_position(&toplevel->scene_tree->node,
+            toplevel->expanded_restore_x, toplevel->expanded_restore_y);
+        if (toplevel->expanded_restore_w > 0 && toplevel->expanded_restore_h > 0) {
+            wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
+                toplevel->expanded_restore_w, toplevel->expanded_restore_h);
+        }
+        return;
+    }
+
+    int ow = 0, oh = 0;
+    if (!ade_get_primary_output_size(toplevel->server, &ow, &oh) || ow <= 0 || oh <= 0) {
+        return;
+    }
+
+    toplevel->expanded = true;
+    toplevel->expanded_restore_x = toplevel->scene_tree->node.x;
+    toplevel->expanded_restore_y = toplevel->scene_tree->node.y;
+    toplevel->expanded_restore_w = geo.width;
+    toplevel->expanded_restore_h = geo.height;
+
+    const int top_inset = -ADE_TAB_Y;
+    const int side_inset = ADE_LEFT_RESIZE_GRIP_W;
+    const int bottom_inset = ADE_TOP_RESIZE_GRIP_H;
+    int expanded_w = ow - side_inset - 1;
+    int expanded_h = oh - top_inset - bottom_inset - 1;
+    if (expanded_w < 64) {
+        expanded_w = 64;
+    }
+    if (expanded_h < 64) {
+        expanded_h = 64;
+    }
+
+    wlr_scene_node_set_position(&toplevel->scene_tree->node, side_inset, top_inset);
+    wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, expanded_w, expanded_h);
 }
 
 
@@ -4800,6 +4856,20 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
                 shift_down = (mods & WLR_MODIFIER_SHIFT) != 0;
             }
 
+            if (!shift_down) {
+                const uint32_t dbl_ms = 400;
+                if (server->last_tab_clicked_toplevel == clicked_toplevel &&
+                        server->last_tab_click_msec != 0 &&
+                        (event->time_msec - server->last_tab_click_msec) <= dbl_ms) {
+                    server->last_tab_click_msec = 0;
+                    server->last_tab_clicked_toplevel = NULL;
+                    ade_toggle_toplevel_expand(clicked_toplevel);
+                    return;
+                }
+                server->last_tab_click_msec = event->time_msec;
+                server->last_tab_clicked_toplevel = clicked_toplevel;
+            }
+
             if (shift_down) {
                 begin_tab_drag(clicked_toplevel);
             } else {
@@ -7215,6 +7285,8 @@ int main(int argc, char *argv[]) {
     
     server.last_icon_click_msec = 0;
     server.icon_click_count = 0;
+    server.last_tab_click_msec = 0;
+    server.last_tab_clicked_toplevel = NULL;
     
     server.dragged_icon_node = NULL;
     server.icon_grab_dx = 0;
@@ -7692,6 +7764,7 @@ int main(int argc, char *argv[]) {
     server.session_entry_count = 0;
     
     server.last_clicked_icon = NULL;
+    server.last_tab_clicked_toplevel = NULL;
     
     return 0;
 }
