@@ -3403,11 +3403,14 @@ static void ade_save_session_to_json(struct tinywl_server *server) {
             fputs(",\n", f);
         }
         first = false;
+        int save_x = toplevel->minimized ? toplevel->minimized_restore_x : toplevel->scene_tree->node.x;
+        int save_y = toplevel->minimized ? toplevel->minimized_restore_y : toplevel->scene_tree->node.y;
+        save_x += geo.x;
+        save_y += geo.y;
         fprintf(f,
             "  {\"app_id\":\"%s\",\"title\":\"%s\",\"command\":\"%s\",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d}",
             app_id_esc, title_esc, cmd_esc,
-            toplevel->minimized ? toplevel->minimized_restore_x : toplevel->scene_tree->node.x,
-            toplevel->minimized ? toplevel->minimized_restore_y : toplevel->scene_tree->node.y,
+            save_x, save_y,
             geo.width, geo.height);
 
         free(app_id_esc);
@@ -3825,6 +3828,9 @@ static struct ade_session_entry *ade_match_session_entry(struct tinywl_toplevel 
     struct tinywl_server *server = toplevel->server;
     const char *app_id = toplevel->xdg_toplevel->app_id ? toplevel->xdg_toplevel->app_id : "";
     const char *title = toplevel->xdg_toplevel->title ? toplevel->xdg_toplevel->title : "";
+    char current_command[256];
+    bool have_current_command =
+        ade_session_command_for_toplevel(toplevel, current_command, sizeof(current_command));
 
     for (int i = 0; i < server->session_entry_count; i++) {
         struct ade_session_entry *entry = &server->session_entries[i];
@@ -3834,6 +3840,19 @@ static struct ade_session_entry *ade_match_session_entry(struct tinywl_toplevel 
         if (entry->title != NULL && entry->title[0] != '\0' &&
                 title[0] != '\0' &&
                 ade_streq_nocase(entry->title, title)) {
+            entry->matched = true;
+            return entry;
+        }
+    }
+
+    for (int i = 0; i < server->session_entry_count; i++) {
+        struct ade_session_entry *entry = &server->session_entries[i];
+        if (entry->matched || entry->command == NULL) {
+            continue;
+        }
+        if (have_current_command &&
+                entry->command[0] != '\0' &&
+                ade_streq_nocase(entry->command, current_command)) {
             entry->matched = true;
             return entry;
         }
@@ -5988,7 +6007,9 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
         toplevel->restore_y = restore->y;
         toplevel->restore_w = restore->width;
         toplevel->restore_h = restore->height;
-        wlr_scene_node_set_position(&toplevel->scene_tree->node, restore->x, restore->y);
+        struct wlr_box geo = toplevel->xdg_toplevel->base->geometry;
+        wlr_scene_node_set_position(&toplevel->scene_tree->node,
+            restore->x - geo.x, restore->y - geo.y);
         if (restore->width > 0 && restore->height > 0) {
             wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, restore->width, restore->height);
         }
@@ -6095,8 +6116,10 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
             wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
                 toplevel->restore_w, toplevel->restore_h);
         }
+        struct wlr_box restore_geo = toplevel->xdg_toplevel->base->geometry;
         wlr_scene_node_set_position(&toplevel->scene_tree->node,
-            toplevel->restore_x, toplevel->restore_y);
+            toplevel->restore_x - restore_geo.x,
+            toplevel->restore_y - restore_geo.y);
         if (w > 0 && h > 0) {
             toplevel->restore_pending = false;
         }
