@@ -307,7 +307,12 @@ struct tinywl_toplevel {
     // Close button (right side of the tab)
     struct wlr_scene_tree *close_tree;
     struct wlr_scene_rect *close_bg;
+    struct wlr_scene_tree *close_inner_tree;
     struct wlr_scene_tree *close_x_tree;
+    struct wlr_scene_tree *expand_tree;
+    struct wlr_scene_rect *expand_bg;
+    struct wlr_scene_tree *expand_inner_tree;
+    struct wlr_scene_tree *expand_plus_tree;
 
     // Simple gray window border (BeOS-style)
     struct wlr_scene_rect *border_top;
@@ -374,10 +379,6 @@ struct tinywl_toplevel {
     struct wl_listener request_resize;
     struct wl_listener request_maximize;
     struct wl_listener request_fullscreen;
-    
-    struct wlr_scene_tree *expand_tree;
-    struct wlr_scene_rect *expand_bg;
-    struct wlr_scene_tree *expand_plus_tree;
     
     struct wlr_xdg_toplevel_decoration_v1 *xdg_decoration;
     struct wl_listener xdg_decoration_request_mode;
@@ -820,6 +821,61 @@ static struct wlr_buffer *ade_make_tab_title_buffer(const char *text,
 
     g_object_unref(layout);
     pango_font_description_free(desc2);
+    cairo_surface_flush(surface);
+
+    int stride = cairo_image_surface_get_stride(surface);
+    uint8_t *src = cairo_image_surface_get_data(surface);
+
+    struct ade_pixel_buffer *buf = calloc(1, sizeof(*buf));
+    if (buf == NULL) {
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        return NULL;
+    }
+
+    buf->width = width;
+    buf->height = height;
+    buf->stride = (size_t)stride;
+    buf->format = DRM_FORMAT_ARGB8888;
+    buf->data = malloc((size_t)stride * (size_t)height);
+    if (buf->data == NULL) {
+        free(buf);
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        return NULL;
+    }
+    memcpy(buf->data, src, (size_t)stride * (size_t)height);
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+
+    wlr_buffer_init(&buf->base, &ade_pixel_buffer_impl, (size_t)width, (size_t)height);
+    if (out_w) *out_w = width;
+    if (out_h) *out_h = height;
+    return &buf->base;
+}
+
+static struct wlr_buffer *ade_make_close_x_buffer(int *out_w, int *out_h) {
+    const int width = 10;
+    const int height = 10;
+    cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+    cairo_t *cr = cairo_create(surface);
+
+    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+    cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+    cairo_set_line_width(cr, 1.6);
+    cairo_set_source_rgba(cr, 0.34, 0.32, 0.28, 1.0);
+
+    cairo_move_to(cr, 1.5, 1.5);
+    cairo_line_to(cr, width - 1.5, height - 1.5);
+    cairo_move_to(cr, width - 1.5, 1.5);
+    cairo_line_to(cr, 1.5, height - 1.5);
+    cairo_stroke(cr);
     cairo_surface_flush(surface);
 
     int stride = cairo_image_surface_get_stride(surface);
@@ -1659,6 +1715,10 @@ static void ade_tab_clear_close(struct tinywl_toplevel *toplevel) {
         wlr_scene_node_destroy(&toplevel->close_x_tree->node);
         toplevel->close_x_tree = NULL;
     }
+    if (toplevel->close_inner_tree != NULL) {
+        wlr_scene_node_destroy(&toplevel->close_inner_tree->node);
+        toplevel->close_inner_tree = NULL;
+    }
     if (toplevel->close_bg != NULL) {
         wlr_scene_node_destroy(&toplevel->close_bg->node);
         toplevel->close_bg = NULL;
@@ -1674,6 +1734,10 @@ static void ade_tab_clear_expand(struct tinywl_toplevel *toplevel) {
         wlr_scene_node_destroy(&toplevel->expand_plus_tree->node);
         toplevel->expand_plus_tree = NULL;
     }
+    if (toplevel->expand_inner_tree != NULL) {
+        wlr_scene_node_destroy(&toplevel->expand_inner_tree->node);
+        toplevel->expand_inner_tree = NULL;
+    }
     if (toplevel->expand_bg != NULL) {
         wlr_scene_node_destroy(&toplevel->expand_bg->node);
         toplevel->expand_bg = NULL;
@@ -1682,6 +1746,61 @@ static void ade_tab_clear_expand(struct tinywl_toplevel *toplevel) {
         wlr_scene_node_destroy(&toplevel->expand_tree->node);
         toplevel->expand_tree = NULL;
     }
+}
+
+static void ade_tab_build_expand_inner_fill(struct tinywl_toplevel *toplevel, bool selected,
+        int btn_x, int btn_y, int btn_w, int btn_h) {
+    if (toplevel == NULL || toplevel->expand_tree == NULL) {
+        return;
+    }
+
+    if (toplevel->expand_inner_tree != NULL) {
+        wlr_scene_node_destroy(&toplevel->expand_inner_tree->node);
+        toplevel->expand_inner_tree = NULL;
+    }
+
+    toplevel->expand_inner_tree = wlr_scene_tree_create(toplevel->expand_tree);
+    if (toplevel->expand_inner_tree == NULL) {
+        return;
+    }
+
+    const int inner_x = btn_x + 1;
+    const int inner_y = btn_y + 1;
+    const int inner_w = btn_w - 2;
+    const int inner_h = btn_h - 2;
+    wlr_scene_node_set_position(&toplevel->expand_inner_tree->node, inner_x, inner_y);
+
+    if (selected) {
+        const float top_col[3] = {
+            254.0f / 255.0f, 236.0f / 255.0f, 166.0f / 255.0f
+        };
+        const float bottom_col[3] = {
+            254.0f / 255.0f, 194.0f / 255.0f, 7.0f / 255.0f
+        };
+
+        for (int y = 0; y < inner_h; y++) {
+            float t = (inner_h <= 1) ? 0.0f : (float)y / (float)(inner_h - 1);
+            float col[4] = {
+                top_col[0] * (1.0f - t) + bottom_col[0] * t,
+                top_col[1] * (1.0f - t) + bottom_col[1] * t,
+                top_col[2] * (1.0f - t) + bottom_col[2] * t,
+                1.0f
+            };
+            struct wlr_scene_rect *row =
+                wlr_scene_rect_create(toplevel->expand_inner_tree, inner_w, 1, col);
+            if (row != NULL) {
+                wlr_scene_node_set_position(&row->node, 0, y);
+            }
+        }
+    } else {
+        const float grey[4] = { 0.85f, 0.85f, 0.85f, 1.0f };
+        struct wlr_scene_rect *inner =
+            wlr_scene_rect_create(toplevel->expand_inner_tree, inner_w, inner_h, grey);
+        if (inner != NULL) {
+            wlr_scene_node_set_position(&inner->node, 0, 0);
+        }
+    }
+
 }
 
 static void ade_set_tab_selected(struct tinywl_toplevel *toplevel, bool selected);
@@ -1725,6 +1844,61 @@ static void ade_tab_build_gradient(struct tinywl_toplevel *toplevel, int tab_wid
     wlr_scene_node_lower_to_bottom(&toplevel->tab_grad_tree->node);
 }
 
+static void ade_tab_build_close_inner_fill(struct tinywl_toplevel *toplevel, bool selected,
+        int btn_x, int btn_y, int btn_w, int btn_h) {
+    if (toplevel == NULL || toplevel->close_tree == NULL) {
+        return;
+    }
+
+    if (toplevel->close_inner_tree != NULL) {
+        wlr_scene_node_destroy(&toplevel->close_inner_tree->node);
+        toplevel->close_inner_tree = NULL;
+    }
+
+    toplevel->close_inner_tree = wlr_scene_tree_create(toplevel->close_tree);
+    if (toplevel->close_inner_tree == NULL) {
+        return;
+    }
+
+    const int inner_x = btn_x + 1;
+    const int inner_y = btn_y + 1;
+    const int inner_w = btn_w - 2;
+    const int inner_h = btn_h - 2;
+    wlr_scene_node_set_position(&toplevel->close_inner_tree->node, inner_x, inner_y);
+
+    if (selected) {
+        const float top_col[3] = {
+            254.0f / 255.0f, 236.0f / 255.0f, 166.0f / 255.0f
+        };
+        const float bottom_col[3] = {
+            254.0f / 255.0f, 194.0f / 255.0f, 7.0f / 255.0f
+        };
+
+        for (int y = 0; y < inner_h; y++) {
+            float t = (inner_h <= 1) ? 0.0f : (float)y / (float)(inner_h - 1);
+            float col[4] = {
+                top_col[0] * (1.0f - t) + bottom_col[0] * t,
+                top_col[1] * (1.0f - t) + bottom_col[1] * t,
+                top_col[2] * (1.0f - t) + bottom_col[2] * t,
+                1.0f
+            };
+            struct wlr_scene_rect *row =
+                wlr_scene_rect_create(toplevel->close_inner_tree, inner_w, 1, col);
+            if (row != NULL) {
+                wlr_scene_node_set_position(&row->node, 0, y);
+            }
+        }
+    } else {
+        const float grey[4] = { 0.85f, 0.85f, 0.85f, 1.0f };
+        struct wlr_scene_rect *inner =
+            wlr_scene_rect_create(toplevel->close_inner_tree, inner_w, inner_h, grey);
+        if (inner != NULL) {
+            wlr_scene_node_set_position(&inner->node, 0, 0);
+        }
+    }
+
+}
+
 
 
 static void ade_tab_build_close(struct tinywl_toplevel *toplevel, int tab_width) {
@@ -1747,23 +1921,20 @@ static void ade_tab_build_close(struct tinywl_toplevel *toplevel, int tab_width)
     float bg[4] = { 0.92f, 0.72f, 0.12f, 1.0f };
     toplevel->close_bg = wlr_scene_rect_create(toplevel->close_tree, btn_w, btn_h, bg);
     wlr_scene_node_set_position(&toplevel->close_bg->node, btn_x, btn_y);
+    ade_tab_build_close_inner_fill(toplevel, true, btn_x, btn_y, btn_w, btn_h);
 
     toplevel->close_x_tree = wlr_scene_tree_create(toplevel->close_tree);
     if (toplevel->close_x_tree != NULL) {
-        int text_w = 0, text_h = 0;
-        struct wlr_buffer *label_buf =
-            ade_make_text_buffer_rgba_noshadow("X", 0.25, 0.18, 0.05, 1.0, &text_w, &text_h);
-        if (label_buf != NULL) {
-            struct wlr_scene_buffer *label_scene =
-                wlr_scene_buffer_create(toplevel->close_x_tree, label_buf);
-            wlr_buffer_drop(label_buf);
-            if (label_scene != NULL) {
-                int text_x = btn_x + (btn_w - text_w) / 2;
-                int text_y = btn_y + (btn_h - text_h) / 2 - 2;
-                if (text_y < btn_y) {
-                    text_y = btn_y;
-                }
-                wlr_scene_node_set_position(&label_scene->node, text_x, text_y);
+        int glyph_w = 0, glyph_h = 0;
+        struct wlr_buffer *glyph_buf = ade_make_close_x_buffer(&glyph_w, &glyph_h);
+        if (glyph_buf != NULL) {
+            struct wlr_scene_buffer *glyph_scene =
+                wlr_scene_buffer_create(toplevel->close_x_tree, glyph_buf);
+            wlr_buffer_drop(glyph_buf);
+            if (glyph_scene != NULL) {
+                int glyph_x = btn_x + (btn_w - glyph_w) / 2;
+                int glyph_y = btn_y + (btn_h - glyph_h) / 2;
+                wlr_scene_node_set_position(&glyph_scene->node, glyph_x, glyph_y);
             }
         }
     }
@@ -1788,28 +1959,45 @@ static void ade_tab_build_expand(struct tinywl_toplevel *toplevel, int tab_width
     float bg[4] = { 0.92f, 0.72f, 0.12f, 1.0f };
     toplevel->expand_bg = wlr_scene_rect_create(toplevel->expand_tree, btn_w, btn_h, bg);
     wlr_scene_node_set_position(&toplevel->expand_bg->node, btn_x, btn_y);
+    ade_tab_build_expand_inner_fill(toplevel, true, btn_x, btn_y, btn_w, btn_h);
 
     toplevel->expand_plus_tree = wlr_scene_tree_create(toplevel->expand_tree);
     if (toplevel->expand_plus_tree != NULL) {
-        int text_w = 0, text_h = 0;
-        struct wlr_buffer *label_buf =
-            ade_make_text_buffer_rgba_noshadow("+", 0.25, 0.18, 0.05, 1.0, &text_w, &text_h);
-        if (label_buf != NULL) {
-            struct wlr_scene_buffer *label_scene =
-                wlr_scene_buffer_create(toplevel->expand_plus_tree, label_buf);
-            wlr_buffer_drop(label_buf);
-            if (label_scene != NULL) {
-                int text_x = btn_x + (btn_w - text_w) / 2;
-                int text_y = btn_y + (btn_h - text_h) / 2 - 2;
-                if (text_y < btn_y) {
-                    text_y = btn_y;
-                }
-                wlr_scene_node_set_position(&label_scene->node, text_x, text_y);
-            }
+        const float ink[4] = { 0.34f, 0.32f, 0.28f, 1.0f };
+        struct wlr_scene_rect *line =
+            wlr_scene_rect_create(toplevel->expand_plus_tree, 8, 2, ink);
+        if (line != NULL) {
+            int line_x = btn_x + (btn_w - 8) / 2;
+            int line_y = btn_y + 11;
+            wlr_scene_node_set_position(&line->node, line_x, line_y);
         }
     }
 
     wlr_scene_node_raise_to_top(&toplevel->expand_tree->node);
+}
+
+static void ade_tab_refresh_button_inner_fills(struct tinywl_toplevel *toplevel, bool selected) {
+    if (toplevel == NULL) {
+        return;
+    }
+
+    const int btn_w = 18;
+    const int btn_h = 18;
+    const int btn_y = ADE_TAB_CONTENT_Y_OFFSET - 1;
+    const int close_btn_x = 5;
+    int expand_btn_x = ((toplevel->tab_width_px > 0) ? toplevel->tab_width_px : 160) - 10 - btn_w + 5;
+    if (expand_btn_x < 0) {
+        expand_btn_x = 0;
+    }
+
+    ade_tab_build_close_inner_fill(toplevel, selected, close_btn_x, btn_y, btn_w, btn_h);
+    ade_tab_build_expand_inner_fill(toplevel, selected, expand_btn_x, btn_y, btn_w, btn_h);
+    if (toplevel->close_x_tree != NULL) {
+        wlr_scene_node_raise_to_top(&toplevel->close_x_tree->node);
+    }
+    if (toplevel->expand_plus_tree != NULL) {
+        wlr_scene_node_raise_to_top(&toplevel->expand_plus_tree->node);
+    }
 }
 
 static void ade_tab_render_title(struct tinywl_toplevel *toplevel, const char *title) {
@@ -1937,6 +2125,7 @@ static void ade_set_tab_selected(struct tinywl_toplevel *toplevel, bool selected
         if (toplevel->expand_bg != NULL) {
             wlr_scene_rect_set_color(toplevel->expand_bg, btn_selected);
         }
+        ade_tab_refresh_button_inner_fills(toplevel, true);
 
         int w = (toplevel->tab_width_px > 0) ? toplevel->tab_width_px : 160;
         ade_tab_build_gradient(toplevel, w);
@@ -1958,6 +2147,7 @@ static void ade_set_tab_selected(struct tinywl_toplevel *toplevel, bool selected
         if (toplevel->expand_bg != NULL) {
             wlr_scene_rect_set_color(toplevel->expand_bg, btn_unselected);
         }
+        ade_tab_refresh_button_inner_fills(toplevel, false);
     }
 }
 
