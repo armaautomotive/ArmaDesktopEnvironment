@@ -10,4 +10,4 @@ ADE is built on **wlroots** and targets modern Linux systems, while intentionall
 
 
 
-![ADE Desktop Screenshot](screenshots/ADE_March_14_2026.png)
+![ADE Desktop Screenshot](screenshots/ADE_March_16_2026.png)

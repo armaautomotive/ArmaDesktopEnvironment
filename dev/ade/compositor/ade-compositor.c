@@ -290,6 +290,9 @@ struct tinywl_toplevel {
     int restore_y;
     int restore_w;
     int restore_h;
+    bool minimized;
+    int minimized_restore_x;
+    int minimized_restore_y;
     
     /* Simple server-side decoration: BeOS-style tab */
     struct wlr_scene_tree *decor_tree;
@@ -477,6 +480,8 @@ static void ade_spawn_shell_with_install_fallback(const char *sh_cmd,
 // Forward declarations
 static void ade_update_background(struct tinywl_server *server);
 static void ade_load_background_color(struct tinywl_server *server, const char *path);
+static void ade_minimize_toplevel(struct tinywl_toplevel *toplevel);
+static void ade_restore_minimized_toplevel(struct tinywl_toplevel *toplevel);
 
 // Ensure the xcursor theme is loaded at the output scale.
 // If the cursor theme is only loaded at scale=1 on a HiDPI output,
@@ -929,6 +934,8 @@ static void ade_save_session_to_json(struct tinywl_server *server);
 static void ade_save_desktop_icon_positions(struct tinywl_server *server);
 static bool ade_load_desktop_icon_position(struct tinywl_server *server,
         const char *title, const char *command, int *out_x, int *out_y);
+static void ade_deskbar_update_layout(struct tinywl_server *server);
+static void ade_relayout_desktop_scene(struct tinywl_server *server);
 static void ade_request_quit(struct tinywl_server *server);
 static void ade_context_menu_close(struct tinywl_server *server);
 static void ade_context_submenu_close(struct tinywl_server *server);
@@ -2158,6 +2165,10 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel) {
         return;
     }
 
+    if (toplevel->minimized) {
+        ade_restore_minimized_toplevel(toplevel);
+    }
+
     struct tinywl_server *server = toplevel->server;
     struct wlr_seat *seat = server->seat;
     struct wlr_surface *prev_surface = seat->keyboard_state.focused_surface;
@@ -2209,6 +2220,48 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel) {
         wlr_seat_keyboard_notify_enter(seat, surface,
             keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
     }
+}
+
+static void ade_restore_minimized_toplevel(struct tinywl_toplevel *toplevel) {
+    if (toplevel == NULL || !toplevel->minimized || toplevel->scene_tree == NULL) {
+        return;
+    }
+
+    toplevel->minimized = false;
+    wlr_scene_node_set_position(&toplevel->scene_tree->node,
+        toplevel->minimized_restore_x, toplevel->minimized_restore_y);
+    if (toplevel->server != NULL) {
+        ade_relayout_desktop_scene(toplevel->server);
+    }
+}
+
+static void ade_minimize_toplevel(struct tinywl_toplevel *toplevel) {
+    if (toplevel == NULL || toplevel->scene_tree == NULL || toplevel->server == NULL) {
+        return;
+    }
+    if (toplevel->minimized) {
+        return;
+    }
+
+    struct tinywl_server *server = toplevel->server;
+    toplevel->minimized = true;
+    toplevel->minimized_restore_x = toplevel->scene_tree->node.x;
+    toplevel->minimized_restore_y = toplevel->scene_tree->node.y;
+    wlr_scene_node_set_position(&toplevel->scene_tree->node, -32768, -32768);
+    wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, false);
+
+    struct tinywl_toplevel *next = NULL;
+    struct tinywl_toplevel *it = NULL;
+    wl_list_for_each(it, &server->toplevels, link) {
+        if (it != toplevel && !it->minimized) {
+            next = it;
+            break;
+        }
+    }
+    if (next != NULL) {
+        focus_toplevel(next);
+    }
+    ade_deskbar_update_layout(server);
 }
 
 
@@ -3353,7 +3406,8 @@ static void ade_save_session_to_json(struct tinywl_server *server) {
         fprintf(f,
             "  {\"app_id\":\"%s\",\"title\":\"%s\",\"command\":\"%s\",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d}",
             app_id_esc, title_esc, cmd_esc,
-            toplevel->scene_tree->node.x, toplevel->scene_tree->node.y,
+            toplevel->minimized ? toplevel->minimized_restore_x : toplevel->scene_tree->node.x,
+            toplevel->minimized ? toplevel->minimized_restore_y : toplevel->scene_tree->node.y,
             geo.width, geo.height);
 
         free(app_id_esc);
@@ -3777,13 +3831,23 @@ static struct ade_session_entry *ade_match_session_entry(struct tinywl_toplevel 
         if (entry->matched || entry->command == NULL) {
             continue;
         }
-        if (entry->app_id != NULL && entry->app_id[0] != '\0' &&
-                ade_streq_nocase(entry->app_id, app_id)) {
+        if (entry->title != NULL && entry->title[0] != '\0' &&
+                title[0] != '\0' &&
+                ade_streq_nocase(entry->title, title)) {
             entry->matched = true;
             return entry;
         }
-        if (entry->title != NULL && entry->title[0] != '\0' &&
-                ade_streq_nocase(entry->title, title)) {
+    }
+
+    for (int i = 0; i < server->session_entry_count; i++) {
+        struct ade_session_entry *entry = &server->session_entries[i];
+        if (entry->matched || entry->command == NULL) {
+            continue;
+        }
+        if ((entry->title == NULL || entry->title[0] == '\0') &&
+                title[0] == '\0' &&
+                entry->app_id != NULL && entry->app_id[0] != '\0' &&
+                ade_streq_nocase(entry->app_id, app_id)) {
             entry->matched = true;
             return entry;
         }
@@ -4568,6 +4632,9 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
         struct tinywl_toplevel *deskbar_toplevel =
             ade_deskbar_toplevel_from_node(server, node);
         if (deskbar_toplevel != NULL) {
+            if (deskbar_toplevel->minimized) {
+                ade_restore_minimized_toplevel(deskbar_toplevel);
+            }
             focus_toplevel(deskbar_toplevel);
             return;
         }
@@ -4689,6 +4756,12 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
             ade_node_is_or_ancestor(node, &clicked_toplevel->close_tree->node)) {
             wlr_xdg_toplevel_send_close(clicked_toplevel->xdg_toplevel);
             return; // Do not send this click to clients
+        }
+
+        if (clicked_toplevel->expand_tree != NULL &&
+            ade_node_is_or_ancestor(node, &clicked_toplevel->expand_tree->node)) {
+            ade_minimize_toplevel(clicked_toplevel);
+            return;
         }
 
         // Treat ANY click on the tab (background, text, or decorations) as a tab click
@@ -5036,6 +5109,9 @@ static void ade_relayout_desktop_scene(struct tinywl_server *server) {
     struct tinywl_toplevel *toplevel = NULL;
     wl_list_for_each(toplevel, &server->toplevels, link) {
         if (toplevel == NULL || toplevel->scene_tree == NULL || toplevel->xdg_toplevel == NULL) {
+            continue;
+        }
+        if (toplevel->minimized) {
             continue;
         }
 
