@@ -5626,13 +5626,18 @@ static void ade_deskbar_rebuild_apps(struct tinywl_server *server) {
         }
 
         int text_w = 0, text_h = 0;
-        struct wlr_buffer *label_buf = ade_make_text_buffer(label, &text_w, &text_h);
+        int text_x = 22;
+        int max_text_w = slot_w - text_x - 4;
+        if (max_text_w < 16) {
+            max_text_w = 16;
+        }
+        struct wlr_buffer *label_buf =
+            ade_make_tab_title_buffer(label, max_text_w, &text_w, &text_h);
         if (label_buf != NULL) {
             struct wlr_scene_buffer *label_scene =
                 wlr_scene_buffer_create(item_tree, label_buf);
             wlr_buffer_drop(label_buf);
             if (label_scene != NULL) {
-                int text_x = 22;
                 int text_y = (slot_h - text_h) / 2;
                 if (text_y < 0) {
                     text_y = 0;
