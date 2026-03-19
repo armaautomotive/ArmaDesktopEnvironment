@@ -256,6 +256,7 @@ struct tinywl_server {
     struct ade_desktop_icons desktop_icons_state;
     char desktop_icons_conf_path[512];
     char desktop_icon_positions_path[512];
+    char desktop_icon_commands_path[512];
     char background_conf_path[512];
     float background_color[4];
     
@@ -942,6 +943,10 @@ static void ade_save_session_to_json(struct tinywl_server *server);
 static void ade_save_desktop_icon_positions(struct tinywl_server *server);
 static bool ade_load_desktop_icon_position(struct tinywl_server *server,
         const char *title, const char *command, int *out_x, int *out_y);
+static char *ade_load_desktop_icon_command_override(
+        struct tinywl_server *server, const char *title);
+static char *ade_desktop_icon_effective_command(
+        struct tinywl_server *server, struct ade_desktop_icon *icon);
 static void ade_deskbar_update_layout(struct tinywl_server *server);
 static void ade_relayout_desktop_scene(struct tinywl_server *server);
 static bool ade_get_primary_output_size(struct tinywl_server *server, int *out_w, int *out_h);
@@ -3815,6 +3820,61 @@ static bool ade_load_desktop_icon_position(struct tinywl_server *server,
     return found;
 }
 
+static char *ade_load_desktop_icon_command_override(
+        struct tinywl_server *server, const char *title) {
+    if (server == NULL || title == NULL || title[0] == '\0' ||
+            server->desktop_icon_commands_path[0] == '\0') {
+        return NULL;
+    }
+
+    FILE *f = fopen(server->desktop_icon_commands_path, "r");
+    if (f == NULL) {
+        return NULL;
+    }
+
+    char line[2048];
+    char current_group[256] = {0};
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *p = ade_trim(line);
+        if (*p == '\0' || *p == '#' || *p == ';') {
+            continue;
+        }
+
+        size_t len = strlen(p);
+        if (len >= 2 && p[0] == '[' && p[len - 1] == ']') {
+            p[len - 1] = '\0';
+            snprintf(current_group, sizeof(current_group), "%s", p + 1);
+            continue;
+        }
+
+        if (strcmp(current_group, title) != 0) {
+            continue;
+        }
+
+        if (strncmp(p, "command=", 8) == 0) {
+            fclose(f);
+            return strdup(p + 8);
+        }
+    }
+
+    fclose(f);
+    return NULL;
+}
+
+static char *ade_desktop_icon_effective_command(
+        struct tinywl_server *server, struct ade_desktop_icon *icon) {
+    if (icon == NULL) {
+        return NULL;
+    }
+
+    char *override_cmd = ade_load_desktop_icon_command_override(server, icon->title);
+    if (override_cmd != NULL && override_cmd[0] != '\0') {
+        return override_cmd;
+    }
+    free(override_cmd);
+    return icon->exec_cmd != NULL ? strdup(icon->exec_cmd) : NULL;
+}
+
 static void ade_save_desktop_icon_positions(struct tinywl_server *server) {
     if (server == NULL || server->desktop_icon_positions_path[0] == '\0' ||
             server->desktop_icons == NULL) {
@@ -4482,9 +4542,28 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
                 if (server->icon_click_count >= 2) {
                     server->icon_click_count = 0;
                     server->last_icon_click_msec = 0;
-                    //ade_launch_terminal();
-                    if (server->last_clicked_icon != NULL && server->last_clicked_icon->exec_cmd != NULL) {
-                        ade_spawn_shell(server->last_clicked_icon->exec_cmd);
+                    if (server->last_clicked_icon != NULL) {
+                        const char *icon_title =
+                            (server->last_clicked_icon->title != NULL &&
+                             server->last_clicked_icon->title[0] != '\0') ?
+                                server->last_clicked_icon->title : "Desktop Application";
+                        char *effective_cmd =
+                            ade_desktop_icon_effective_command(server, server->last_clicked_icon);
+                        if (effective_cmd == NULL) {
+                            effective_cmd = strdup("");
+                        }
+                        char dialog_title[128];
+                        char dialog_message[512];
+                        snprintf(dialog_title, sizeof(dialog_title), "ADE %s", icon_title);
+                        snprintf(dialog_message, sizeof(dialog_message),
+                            "Unable to launch %s.\n\nCommand:\n%s",
+                            icon_title,
+                            effective_cmd != NULL ? effective_cmd : "");
+                        ade_spawn_shell_with_error(
+                            effective_cmd != NULL ? effective_cmd : "",
+                            dialog_title,
+                            dialog_message);
+                        free(effective_cmd);
                     }
                 }
             }
@@ -4559,6 +4638,28 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
             /* fall through */
         } else {
             ade_context_menu_open(server, server->cursor->x, server->cursor->y);
+            return;
+        }
+    }
+
+    if (event->button == BTN_RIGHT &&
+        event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
+        node != NULL &&
+        server->desktop_icons != NULL &&
+        ade_node_is_or_ancestor(node, &server->desktop_icons->node)) {
+        struct ade_desktop_icon *hit_icon = ade_desktop_icon_from_scene_node(node);
+        if (hit_icon != NULL) {
+            char *effective_cmd = ade_desktop_icon_effective_command(server, hit_icon);
+            char *argv[] = {
+                "sh",
+                "launch_icon_command.sh",
+                hit_icon->title != NULL ? hit_icon->title : "Desktop Application",
+                effective_cmd != NULL ? effective_cmd : "",
+                server->desktop_icon_commands_path,
+                NULL
+            };
+            ade_spawn_argv(argv);
+            free(effective_cmd);
             return;
         }
     }
@@ -7479,6 +7580,8 @@ int main(int argc, char *argv[]) {
         "%s", "desktop-icons.conf");
     snprintf(server.desktop_icon_positions_path, sizeof(server.desktop_icon_positions_path),
         "%s", "desktop-icons-state.json");
+    snprintf(server.desktop_icon_commands_path, sizeof(server.desktop_icon_commands_path),
+        "%s", "desktop-icon-commands.ini");
     ade_load_desktop_icons_from_conf(&server, server.desktop_icons_conf_path);
     snprintf(server.context_menu_conf_path, sizeof(server.context_menu_conf_path),
         "%s", "context-menu.json");

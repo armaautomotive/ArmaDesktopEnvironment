@@ -326,6 +326,7 @@ int main(int argc, char **argv) {
     app->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(app->window), "Screen");
     gtk_window_set_default_size(GTK_WINDOW(app->window), 360, 170);
+    gtk_window_set_decorated(GTK_WINDOW(app->window), FALSE);
     gtk_window_set_resizable(GTK_WINDOW(app->window), FALSE);
     gtk_container_set_border_width(GTK_CONTAINER(app->window), 12);
 

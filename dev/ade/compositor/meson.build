@@ -90,4 +90,11 @@ if gtk3.found()
     dependencies: [gtk3],
     install: false
   )
+
+  executable(
+    'ade-icon-command',
+    ['ade-icon-command.c'],
+    dependencies: [gtk3],
+    install: false
+  )
 endif
